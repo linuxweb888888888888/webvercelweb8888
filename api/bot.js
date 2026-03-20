@@ -5,8 +5,8 @@ const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
 const path = require('path');
 
-const PORT = 3000;
-const JWT_SECRET = 'super_secret_jwt_key_change_this_in_production';
+const PORT = process.env.PORT || 3000;
+const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_change_this_in_production';
 
 // ==========================================
 // 1. MONGODB DATABASE SETUP
@@ -485,6 +485,9 @@ const authMiddleware = (req, res, next) => {
         next();
     });
 };
+
+// VERCEL WAKE UP ROUTE
+app.get('/api/ping', (req, res) => res.json({ status: 'Bot is awake!' }));
 
 app.post('/api/register', async (req, res) => {
     try {
@@ -1273,9 +1276,17 @@ app.get('/', (req, res) => {
     `);
 });
 
-app.listen(PORT, () => {
-    console.log(`\n=================================================`);
-    console.log(`🚀 Multi-Coin HTX Smart-Profit Bot is running!`);
-    console.log(`🌐 Open your browser and go to: http://localhost:${PORT}`);
-    console.log(`=================================================\n`);
-});
+// ==================================================
+// VERCEL COMPATIBILITY: Export instead of listen
+// ==================================================
+if (process.env.NODE_ENV !== 'production' && !process.env.VERCEL) {
+    app.listen(PORT, () => {
+        console.log(`\n=================================================`);
+        console.log(`🚀 Multi-Coin HTX Smart-Profit Bot is running!`);
+        console.log(`🌐 Open your browser and go to: http://localhost:${PORT}`);
+        console.log(`=================================================\n`);
+    });
+}
+
+// Export the Express API for Vercel Serverless
+module.exports = app;
