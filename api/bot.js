@@ -8,7 +8,7 @@ const path = require('path');
 const PORT = process.env.PORT || 3000;
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_change_this_in_production';
 
-// ORIGINAL HARDCODED DATABASE URL RESTORED
+// ORIGINAL HARDCODED DATABASE URL
 const MONGO_URI = 'mongodb+srv://web88888888888888_db_user:ZETrZHXzaxoekjkm@clusterweb8888.l0rv6hv.mongodb.net/botdb?appName=Clusterweb8888';
 
 // ==========================================
@@ -204,27 +204,33 @@ function startBot(userId, subAccount) {
                     cState.margin = margin;
                     cState.currentRoi = margin > 0 ? (unrealizedPnl / margin) * 100 : 0;
 
-                    // IDLE COIN DETECTION
+                    // IDLE COIN DETECTION (FIXED)
                     if (cState.contracts > 0 && cState.currentRoi === 0) {
                         if (!cState.zeroRoiStartTime) cState.zeroRoiStartTime = Date.now();
                         if (Date.now() - cState.zeroRoiStartTime > 120000) {
-                            logForProfile(profileId, `[${coin.symbol}] 💤 Idle too long! Closing position.`);
+                            logForProfile(profileId, `[${coin.symbol}] 💤 Idle too long! Attempting to close position.`);
                             const orderSide = activeSide === 'long' ? 'sell' : 'buy';
-                            await exchange.createOrder(coin.symbol, 'market', orderSide, cState.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: currentSettings.leverage }).catch(()=>{});
                             
-                            IdleRecord.create({ userId, profileName: currentSettings.name, symbol: coin.symbol, time: new Date().toLocaleTimeString() }).catch(()=>{});
-                            
-                            coin.botActive = false;
-                            cState.status = 'Stopped';
-                            cState.contracts = 0;
+                            try {
+                                await exchange.createOrder(coin.symbol, 'market', orderSide, cState.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: currentSettings.leverage });
+                                
+                                // ONLY mark as stopped if the order succeeds
+                                IdleRecord.create({ userId, profileName: currentSettings.name, symbol: coin.symbol, time: new Date().toLocaleTimeString() }).catch(()=>{});
+                                
+                                coin.botActive = false;
+                                cState.status = 'Stopped';
+                                cState.contracts = 0;
 
-                            Settings.updateOne(
-                                { "subAccounts._id": currentSettings._id },
-                                { $set: { "subAccounts.$[sub].coins.$[coin].botActive": false } },
-                                { arrayFilters: [{ "sub._id": currentSettings._id }, { "coin.symbol": coin.symbol }] }
-                            ).catch(()=>{});
-                            
-                            cState.zeroRoiStartTime = Date.now();
+                                Settings.updateOne(
+                                    { "subAccounts._id": currentSettings._id },
+                                    { $set: { "subAccounts.$[sub].coins.$[coin].botActive": false } },
+                                    { arrayFilters: [{ "sub._id": currentSettings._id }, { "coin.symbol": coin.symbol }] }
+                                ).catch(()=>{});
+                            } catch (closeErr) {
+                                logForProfile(profileId, `[${coin.symbol}] ❌ Failed to close idle position: ${closeErr.message}. Will retry.`);
+                                // Reset timer slightly so it doesn't spam the API, but tries again soon
+                                cState.zeroRoiStartTime = Date.now() - 110000; 
+                            }
                             continue; 
                         }
                     } else {
@@ -299,11 +305,11 @@ function stopBot(profileId) {
 }
 
 // =========================================================================
-// 5. GLOBAL PROFIT LOGIC
+// 5. GLOBAL PROFIT LOGIC (Manual Strict Mode)
 // =========================================================================
 setInterval(async () => {
     try {
-        await connectDB(); // Ensure DB is connected in Serverless Loop
+        await connectDB(); 
         const usersSettings = await Settings.find({});
         
         for (let userSetting of usersSettings) {
@@ -339,6 +345,7 @@ setInterval(async () => {
 
             if (!firstProfileId || activeCandidates.length === 0) continue;
 
+            // SMART OFFSET - ALWAYS EVALUATE IF >= 2 COINS (For Best SL/TP Performance)
             if ((smartOffsetNetProfit > 0 || smartOffsetStopLoss < 0) && activeCandidates.length >= 2) {
                 activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
                 
@@ -475,19 +482,10 @@ const authMiddleware = async (req, res, next) => {
     });
 };
 
-// ==========================================
-// PING ENDPOINT FOR CRON-JOB.ORG
-// ==========================================
 app.get('/api/ping', async (req, res) => {
-    await connectDB(); // Keep MongoDB connection warm
-    res.status(200).json({ 
-        success: true, 
-        message: 'Bot is awake', 
-        timestamp: new Date().toISOString(),
-        activeProfiles: activeBots.size
-    });
+    await connectDB(); 
+    res.status(200).json({ success: true, message: 'Bot is awake', timestamp: new Date().toISOString(), activeProfiles: activeBots.size });
 });
-// ==========================================
 
 app.post('/api/register', async (req, res) => {
     await connectDB();
@@ -581,12 +579,94 @@ app.get('/api/status', authMiddleware, async (req, res) => {
     
     const dbIdleRecords = await IdleRecord.find({ userId: req.userId }).sort({ timestamp: -1 }).limit(100);
 
-    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], idleRecords: dbIdleRecords });
+    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], idleRecords: dbIdleRecords, globalSettings: settings });
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => {
     const records = await OffsetRecord.find({ userId: req.userId }).sort({ timestamp: -1 }).limit(100);
     res.json(records);
+});
+
+// BULLETPROOF FORCE CLOSE ENDPOINT
+app.post('/api/idle/force-close', authMiddleware, async (req, res) => {
+    try {
+        // 1. Get all unique symbols from the user's Idle records
+        const idleRecords = await IdleRecord.find({ userId: req.userId });
+        const idleSymbols = [...new Set(idleRecords.map(r => r.symbol))];
+
+        if (idleSymbols.length === 0) {
+            return res.json({ success: true, message: 'No idle coins found in history.' });
+        }
+
+        const settings = await Settings.findOne({ userId: req.userId });
+        if (!settings) return res.status(404).json({ error: 'Settings not found' });
+
+        let closedCount = 0;
+
+        for (let sub of settings.subAccounts) {
+            if (!sub.apiKey || !sub.secret) continue;
+
+            const profileId = sub._id.toString();
+            const botData = activeBots.get(profileId); // Get live memory
+
+            const exchange = new ccxt.htx({ 
+                apiKey: sub.apiKey, 
+                secret: sub.secret, 
+                options: { defaultType: 'swap' }
+            });
+
+            // 2. FETCH ALL POSITIONS (Bypasses CCXT HTX bug)
+            const allPositions = await exchange.fetchPositions().catch(() => []);
+            
+            // Filter to only positions that are in the idle list AND currently open
+            const stuckPositions = allPositions.filter(p => idleSymbols.includes(p.symbol) && p.contracts > 0);
+            
+            for (let pos of stuckPositions) {
+                try {
+                    console.log(`[Profile: ${sub.name}] 🚨 Force Closing Idle Position: ${pos.symbol}`);
+                    const orderSide = pos.side === 'long' ? 'sell' : 'buy';
+                    
+                    await exchange.createOrder(pos.symbol, 'market', orderSide, pos.contracts, undefined, { 
+                        offset: 'close', 
+                        reduceOnly: true, 
+                        lever_rate: sub.leverage 
+                    });
+                    
+                    closedCount++;
+                } catch (err) {
+                    console.error(`❌ Force close failed for ${pos.symbol}:`, err.message);
+                }
+            }
+
+            // 3. FORCE KILL IN DATABASE & LIVE MEMORY
+            for (let coin of sub.coins) {
+                if (idleSymbols.includes(coin.symbol)) {
+                    // Turn off in Database
+                    coin.botActive = false; 
+                    
+                    // Turn off in LIVE MEMORY so it doesn't resurrect
+                    if (botData) {
+                        const memCoin = botData.settings.coins.find(c => c.symbol === coin.symbol);
+                        if (memCoin) memCoin.botActive = false;
+
+                        if (botData.state.coinStates[coin.symbol]) {
+                            botData.state.coinStates[coin.symbol].status = 'Stopped';
+                            botData.state.coinStates[coin.symbol].contracts = 0;
+                            botData.state.coinStates[coin.symbol].unrealizedPnl = 0;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Save switches to database
+        await settings.save();
+        
+        res.json({ success: true, message: `🚨 Successfully force-closed ${closedCount} positions and stopped their bots in memory.` });
+
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
 });
 
 // ==========================================
@@ -664,7 +744,12 @@ app.get('/', (req, res) => {
             <!-- IDLE COINS TAB -->
             <div id="idle-tab" style="display:none;">
                 <div class="panel">
-                    <h2 style="color: #d93025;">Coins Closed Due to Being Idle (> 2 Mins on Zero ROI)</h2>
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <h2 style="color: #d93025; border:none; margin:0;">Coins Closed Due to Being Idle</h2>
+                        <button class="btn-red" style="margin:0; width:auto; font-weight:bold;" onclick="forceCloseIdleCoins()">
+                            🚨 Force Close & Stop All Idle Coins
+                        </button>
+                    </div>
                     <div id="idleTableContainer" style="margin-top: 20px;">No idle coins closed yet.</div>
                 </div>
             </div>
@@ -673,7 +758,7 @@ app.get('/', (req, res) => {
             <div id="offset-tab" style="display:none;">
                 <div class="panel">
                     <h2 style="color: #1a73e8;">Live Paired Trades (Evaluating for Smart Offset)</h2>
-                    <p style="font-size:0.85em; color:#5f6368; margin-top:-8px; margin-bottom:16px;">Real-time pairings from outside-in (Rank N & Rank N/2). Automatically closes if Net Profit >= Target.</p>
+                    <p style="font-size:0.85em; color:#5f6368; margin-top:-8px; margin-bottom:16px;">Real-time pairings from outside-in (Rank N & Rank N/2). Always evaluates net PNL (even if both are negative) to ensure Stop Loss triggers optimally.</p>
                     <div id="liveOffsetsContainer">Waiting for live data...</div>
                 </div>
                 
@@ -700,6 +785,7 @@ app.get('/', (req, res) => {
                         
                         <div style="background: #e8f0fe; padding: 12px; border-radius: 6px; margin-bottom: 16px; border: 1px solid #dadce0;">
                             <h4 style="margin: 0 0 8px 0; color: #1a73e8;">Smart Net Profit (Guaranteed Profit > Loss)</h4>
+                            
                             <div class="flex-row">
                                 <div style="flex:1;">
                                     <label style="margin-top:0;">Portfolio Target Profit To Close ALL ($)</label>
@@ -711,13 +797,13 @@ app.get('/', (req, res) => {
                                 </div>
                             </div>
                             <div style="margin-top: 12px;">
-                                <label style="margin-top:0;">Smart Offset Net Profit Target ($)</label>
-                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Constantly pairs your Biggest Winner & Biggest Loser. If their combined Net PNL is greater than this amount, it closes BOTH instantly to secure net profit.</p>
+                                <label style="margin-top:0;">Manual Offset Net Profit Target ($)</label>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Pairs Rank 1 (Winner) & Rank N (Loser). Closes BOTH if Net PNL >= this amount.</p>
                                 <input type="number" step="0.1" id="smartOffsetNetProfit" placeholder="e.g. 1.00 (0 = Disabled)">
                             </div>
                             <div style="margin-top: 12px;">
-                                <label style="margin-top:0;">Smart Offset Stop Loss ($)</label>
-                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">If the paired coins' Net PNL drops to or below this negative amount, it closes BOTH to prevent further loss.</p>
+                                <label style="margin-top:0;">Manual Offset Stop Loss ($)</label>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Always evaluates! If the paired coins' Net PNL drops to or below this negative amount, it closes BOTH.</p>
                                 <input type="number" step="0.1" id="smartOffsetStopLoss" placeholder="e.g. -2.00 (0 = Disabled)">
                             </div>
                             <button class="btn-blue" style="margin-top:16px;" onclick="saveGlobalSettings()">Save Global Settings</button>
@@ -781,7 +867,7 @@ app.get('/', (req, res) => {
                                 <h4 style="margin-top: 0; color: #1a73e8; margin-bottom: 12px;">Bulk Add Predefined Coins</h4>
                                 <div class="flex-row" style="margin-bottom: 12px;">
                                     <div style="flex:1;"><label style="margin-top:0;">Initial Status</label><select id="predefStatus"><option value="stopped">Leave All Stopped</option><option value="started">Start All Coins</option></select></div>
-                                    <div style="flex:1;"><label style="margin-top:0;">Trading Side</label><select id="predefSide"><option value="oddLong">Odd=Long / Even=Short</option><option value="evenLong">Even=Long / Odd=Short</option><option value="allLong">All Long</option><option value="allShort">All Short</option></select></div>
+                                    <div style="flex:1;"><label style="margin-top:0;">Trading Side</label><select id="predefSide"><option value="oddLong">Odd=Long / Even=Short</option><option value="evenLong">Even=Long / Odd=Short</option><option value="allLong">All Short</option><option value="allShort">All Short</option></select></div>
                                 </div>
                                 <button class="btn-blue" style="margin-top: 0;" onclick="addPredefinedList()">+ Add All Predefined</button>
                             </div>
@@ -882,6 +968,22 @@ app.get('/', (req, res) => {
             function logout() { localStorage.removeItem('token'); token = null; checkAuth(); }
             function toggleNewKeys(cb) { const type = cb.checked ? 'text' : 'password'; document.getElementById('newSubKey').type = type; document.getElementById('newSubSecret').type = type; }
             function toggleActiveKeys(cb) { const type = cb.checked ? 'text' : 'password'; document.getElementById('apiKey').type = type; document.getElementById('secret').type = type; }
+
+            async function forceCloseIdleCoins() {
+                if (!confirm("🚨 WARNING: This will scan HTX and Force Market-Close ALL positions for coins listed in the Idle History. Continue?")) return;
+                
+                try {
+                    const res = await fetch('/api/idle/force-close', { 
+                        method: 'POST', 
+                        headers: { 'Authorization': 'Bearer ' + token } 
+                    });
+                    const data = await res.json();
+                    alert(data.message || data.error);
+                    fetchSettings(); // Refresh UI to show them as stopped
+                } catch (err) {
+                    alert("Error executing force close.");
+                }
+            }
 
             async function fetchSettings() {
                 const res = await fetch('/api/settings', { headers: { 'Authorization': 'Bearer ' + token } });
@@ -1116,6 +1218,7 @@ app.get('/', (req, res) => {
                 const allStatuses = data.states || {};
                 const subAccountsUpdated = data.subAccounts || [];
                 const serverIdleRecords = data.idleRecords || [];
+                const globalSet = data.globalSettings || {};
                 
                 if (serverIdleRecords.length === 0) {
                     document.getElementById('idleTableContainer').innerHTML = '<p style="color:#5f6368;">No idle coins closed yet.</p>';
@@ -1179,12 +1282,15 @@ app.get('/', (req, res) => {
                             const l = activeCandidates[loserIndex];
                             const net = w.pnl + l.pnl;
 
+                            const currentTarget = globalSet.smartOffsetNetProfit || 0;
+                            const currentSl = globalSet.smartOffsetStopLoss || 0;
+
                             const wColor = w.pnl >= 0 ? '#1e8e3e' : '#d93025';
                             const lColor = l.pnl >= 0 ? '#1e8e3e' : '#d93025';
                             const nColor = net >= 0 ? '#1e8e3e' : '#d93025';
                             
-                            const isTargetHit = (mySmartOffsetNetProfit > 0 && net >= mySmartOffsetNetProfit);
-                            const isStopHit = (mySmartOffsetStopLoss < 0 && net <= mySmartOffsetStopLoss);
+                            const isTargetHit = (currentTarget > 0 && net >= currentTarget);
+                            const isStopHit = (currentSl < 0 && net <= currentSl);
                             const statusIcon = (isTargetHit || isStopHit) ? '🔥 Executing...' : '⏳ Evaluating';
 
                             liveHtml += \`<tr>
