@@ -1,14 +1,15 @@
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs'); // <--- CHANGED TO bcryptjs
+const bcrypt = require('bcryptjs'); // Using bcryptjs for Vercel compatibility
 const jwt = require('jsonwebtoken');
 const path = require('path');
 
 const PORT = process.env.PORT || 3000;
-// SECURE ENV VARIABLES FOR VERCEL
 const JWT_SECRET = process.env.JWT_SECRET || 'super_secret_jwt_key_change_this_in_production';
-const MONGO_URI = process.env.MONGO_URI;
+
+// ORIGINAL HARDCODED DATABASE URL RESTORED
+const MONGO_URI = 'mongodb+srv://web88888888888888_db_user:ZETrZHXzaxoekjkm@clusterweb8888.l0rv6hv.mongodb.net/botdb?appName=Clusterweb8888';
 
 // ==========================================
 // 1. MONGODB DATABASE SETUP (Serverless Safe)
@@ -17,10 +18,6 @@ let isConnected = false;
 
 const connectDB = async () => {
     if (isConnected) return;
-    if (!MONGO_URI) {
-        console.error('❌ MONGO_URI is missing. Please add it in Vercel Environment Variables.');
-        return;
-    }
     try {
         const db = await mongoose.connect(MONGO_URI);
         isConnected = db.connections[0].readyState === 1;
