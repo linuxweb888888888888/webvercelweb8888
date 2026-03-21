@@ -340,6 +340,7 @@ setInterval(async () => {
 
                 let v1Bucket = [];
                 let v1BucketNet = 0;
+                let allPairsInProfit = true; // NEW RULE
 
                 for (let i = 0; i < totalPairs; i++) {
                     const winnerIndex = i; 
@@ -350,6 +351,11 @@ setInterval(async () => {
 
                     const netResult = biggestWinner.unrealizedPnl + biggestLoser.unrealizedPnl;
                     
+                    // Track if any accumulated pair is in the negative
+                    if (netResult <= 0) {
+                        allPairsInProfit = false;
+                    }
+
                     // Accumulate pairs into the bucket!
                     v1Bucket.push(biggestWinner);
                     v1Bucket.push(biggestLoser);
@@ -358,7 +364,8 @@ setInterval(async () => {
                     let triggerOffset = false;
                     let reason = '';
 
-                    if (smartOffsetNetProfit > 0 && v1BucketNet >= targetV1) {
+                    // STRICT RULE: All pairs in the accumulation must be > 0 to close for Take Profit
+                    if (smartOffsetNetProfit > 0 && v1BucketNet >= targetV1 && allPairsInProfit) {
                         triggerOffset = true;
                         reason = `TAKE PROFIT (Group of ${v1Bucket.length/2} Pairs, Target: $${targetV1.toFixed(4)})`;
                     } else if (smartOffsetStopLoss < 0 && v1BucketNet <= stopLossV1) {
@@ -1324,6 +1331,7 @@ app.get('/', (req, res) => {
 
                         let cumulativeNet = 0;
                         let groupTriggered = false;
+                        let allPairsInProfit = true; // NEW UI RULE
 
                         for (let i = 0; i < totalPairs; i++) {
                             const winnerIndex = i;
@@ -1333,6 +1341,8 @@ app.get('/', (req, res) => {
                             const l = activeCandidates[loserIndex];
                             const net = w.pnl + l.pnl;
                             
+                            if (net <= 0) allPairsInProfit = false; // Track if any pair is negative
+
                             // Only add to bucket if we haven't already hit a target on an earlier pair
                             if (!groupTriggered) {
                                 cumulativeNet += net;
@@ -1343,7 +1353,8 @@ app.get('/', (req, res) => {
                             const nColor = net >= 0 ? '#1e8e3e' : '#d93025';
                             const cColor = cumulativeNet >= 0 ? '#1e8e3e' : '#d93025';
                             
-                            const isTargetHit = (!groupTriggered && targetV1 > 0 && cumulativeNet >= targetV1);
+                            // Check strict conditions
+                            const isTargetHit = (!groupTriggered && targetV1 > 0 && cumulativeNet >= targetV1 && allPairsInProfit);
                             const isStopHit = (!groupTriggered && stopLossV1 < 0 && cumulativeNet <= stopLossV1);
                             
                             let statusIcon = groupTriggered ? '⏸️ (Group Executed Above)' : '⏳ Accumulating...';
@@ -1358,6 +1369,9 @@ app.get('/', (req, res) => {
                                     statusIcon = '🔥 EXECUTING GROUP (SL)!';
                                     groupTriggered = true;
                                 }
+                            } else if (!groupTriggered && targetV1 > 0 && cumulativeNet >= targetV1 && !allPairsInProfit) {
+                                // Provides clear visual feedback if the amount hit the target but one pair is negative
+                                statusIcon = '⏸️ Waiting (A Pair Net is <= 0)';
                             }
 
                             liveHtml += \`<tr>
