@@ -40,6 +40,15 @@ const CoinSettingSchema = new mongoose.Schema({
     botActive: { type: Boolean, default: false }
 });
 
+// NEW SCHEMA TO SAVE PAPER TRADING DATA
+const SimulatedPositionSchema = new mongoose.Schema({
+    symbol: { type: String, required: true },
+    side: { type: String, required: true },
+    contracts: { type: Number, required: true },
+    entryPrice: { type: Number, required: true },
+    contractSize: { type: Number, required: true }
+});
+
 const SubAccountSchema = new mongoose.Schema({
     name: { type: String, required: true },
     apiKey: { type: String, required: true },
@@ -53,7 +62,8 @@ const SubAccountSchema = new mongoose.Schema({
     dcaTargetRoiPct: { type: Number, default: -2.0 },
     maxContracts: { type: Number, default: 1000 },
     realizedPnl: { type: Number, default: 0 },
-    coins: [CoinSettingSchema]
+    coins: [CoinSettingSchema],
+    simulatedPositions: [SimulatedPositionSchema] // PERMANENT STORAGE FOR PAPER TRADES
 });
 
 const SettingsSchema = new mongoose.Schema({
@@ -124,10 +134,24 @@ function startBot(userId, subAccount) {
         enableRateLimit: true 
     });
     
-    // NOTE: INJECTED PAPER TRADING STATE
-    const state = { logs: [], coinStates: {}, simulatedPositions: [], marketsLoaded: false };
+    // NOTE: INJECTED PAPER TRADING STATE (Loads from Database)
+    const state = { 
+        logs: [], 
+        coinStates: {}, 
+        simulatedPositions: subAccount.simulatedPositions || [], 
+        marketsLoaded: false 
+    };
     let isProcessing = false;
     let lastError = '';
+
+    // Helper to save paper trades to DB so they survive reboots
+    const syncPositionsToDB = () => {
+        subAccount.simulatedPositions = state.simulatedPositions;
+        Settings.updateOne(
+            { "subAccounts._id": subAccount._id },
+            { $set: { "subAccounts.$.simulatedPositions": state.simulatedPositions } }
+        ).catch(e => console.error("DB Sync Error for positions:", e));
+    };
 
     // ==========================================
     // PAPER TRADING OVERRIDES (MOCKS CCXT EXECUTION)
@@ -142,6 +166,7 @@ function startBot(userId, subAccount) {
         
         if (isClose) {
             state.simulatedPositions = state.simulatedPositions.filter(p => p.symbol !== symbol);
+            syncPositionsToDB();
             logForProfile(profileId, `[PAPER TRADE] Executed Virtual Close for ${symbol}`);
         } else {
             let pos = state.simulatedPositions.find(p => p.symbol === symbol);
@@ -158,6 +183,7 @@ function startBot(userId, subAccount) {
             const totalCost = (pos.contracts * pos.entryPrice) + (amount * currentPrice);
             pos.contracts += amount;
             pos.entryPrice = totalCost / pos.contracts;
+            syncPositionsToDB();
             logForProfile(profileId, `[PAPER TRADE] Virtual Order: ${side} ${amount} ${symbol} @ ~${currentPrice} (Contract Multiplier: ${realContractSize})`);
         }
         return { id: 'sim_' + Date.now(), info: {} };
@@ -603,7 +629,11 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             sub.realizedPnl = 0; 
             if (sub._id) {
                 const existingSub = existingSettings.subAccounts.find(s => s._id.toString() === sub._id.toString());
-                if (existingSub) sub.realizedPnl = existingSub.realizedPnl || 0;
+                if (existingSub) {
+                    sub.realizedPnl = existingSub.realizedPnl || 0;
+                    // PRESERVE PAPER TRADES WHEN SAVING SETTINGS
+                    sub.simulatedPositions = existingSub.simulatedPositions || []; 
+                }
             }
         });
     }
