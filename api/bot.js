@@ -60,7 +60,8 @@ const SettingsSchema = new mongoose.Schema({
     userId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
     globalTargetPnl: { type: Number, default: 0 },       
     globalTrailingPnl: { type: Number, default: 0 },     
-    smartOffsetNetProfit: { type: Number, default: 0 },  
+    smartOffsetNetProfit: { type: Number, default: 0 },
+    smartOffsetBottomRowV1: { type: Number, default: 5 }, // Nth row from bottom
     smartOffsetStopLoss: { type: Number, default: 0 },
     smartOffsetNetProfit2: { type: Number, default: 0 }, 
     smartOffsetStopLoss2: { type: Number, default: 0 },   
@@ -299,6 +300,7 @@ setInterval(async () => {
             const globalTargetPnl = parseFloat(userSetting.globalTargetPnl) || 0;
             const globalTrailingPnl = parseFloat(userSetting.globalTrailingPnl) || 0;
             const smartOffsetNetProfit = parseFloat(userSetting.smartOffsetNetProfit) || 0;
+            const smartOffsetBottomRowV1 = parseInt(userSetting.smartOffsetBottomRowV1) || 5;
             const smartOffsetStopLoss = parseFloat(userSetting.smartOffsetStopLoss) || 0;
             const smartOffsetNetProfit2 = parseFloat(userSetting.smartOffsetNetProfit2) || 0;
             const smartOffsetStopLoss2 = parseFloat(userSetting.smartOffsetStopLoss2) || 0;
@@ -361,9 +363,9 @@ setInterval(async () => {
                 let runningAccumulation = 0;
                 let peakAccumulation = 0;
                 let peakRowIndex = -1;
-                let fifthBottomAccumulation = 0;
+                let nthBottomAccumulation = 0;
 
-                const targetRefIndex = Math.max(0, totalPairs - 5);
+                const targetRefIndex = Math.max(0, totalPairs - smartOffsetBottomRowV1);
 
                 for (let i = 0; i < totalPairs; i++) {
                     const w = activeCandidates[i];
@@ -378,18 +380,18 @@ setInterval(async () => {
                     }
 
                     if (i === targetRefIndex) {
-                        fifthBottomAccumulation = runningAccumulation;
+                        nthBottomAccumulation = runningAccumulation;
                     }
                 }
 
-                const isFifthBottomPositive = fifthBottomAccumulation > 0;
+                const isNthBottomPositive = nthBottomAccumulation > 0;
 
                 let triggerOffset = false;
                 let reason = '';
                 let finalPairsToClose = [];
                 let finalNetProfit = 0;
 
-                if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation > 0 && peakRowIndex >= 0 && isFifthBottomPositive) {
+                if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation > 0 && peakRowIndex >= 0 && isNthBottomPositive) {
                     triggerOffset = true;
                     reason = `TAKE PROFIT (Harvested Peak at Row ${peakRowIndex + 1}, Target: $${targetV1.toFixed(4)})`;
                     finalNetProfit = peakAccumulation;
@@ -642,7 +644,7 @@ app.post('/api/register', async (req, res) => {
         const { username, password } = req.body;
         const hashedPassword = await bcrypt.hash(password, 10);
         const user = await User.create({ username, password: hashedPassword });
-        await Settings.create({ userId: user._id, subAccounts: [], globalTargetPnl: 0, globalTrailingPnl: 0, smartOffsetNetProfit: 0, smartOffsetStopLoss: 0, smartOffsetNetProfit2: 0, smartOffsetStopLoss2: 0, smartOffsetMaxLossPerMinute: 0 });
+        await Settings.create({ userId: user._id, subAccounts: [], globalTargetPnl: 0, globalTrailingPnl: 0, smartOffsetNetProfit: 0, smartOffsetBottomRowV1: 5, smartOffsetStopLoss: 0, smartOffsetNetProfit2: 0, smartOffsetStopLoss2: 0, smartOffsetMaxLossPerMinute: 0 });
         res.json({ success: true, message: 'Registration successful!' });
     } catch (err) {
         res.status(400).json({ error: 'Username already exists or invalid data.' });
@@ -664,7 +666,7 @@ app.get('/api/settings', authMiddleware, async (req, res) => {
 });
 
 app.post('/api/settings', authMiddleware, async (req, res) => {
-    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute } = req.body;
+    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute } = req.body;
     
     const existingSettings = await Settings.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -696,6 +698,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             globalTargetPnl: parseFloat(globalTargetPnl) || 0, 
             globalTrailingPnl: parseFloat(globalTrailingPnl) || 0,
             smartOffsetNetProfit: parseFloat(smartOffsetNetProfit) || 0,
+            smartOffsetBottomRowV1: parseInt(smartOffsetBottomRowV1) || 5,
             smartOffsetStopLoss: parsedStopLoss,
             smartOffsetNetProfit2: parseFloat(smartOffsetNetProfit2) || 0,
             smartOffsetStopLoss2: parsedStopLoss2,
@@ -825,7 +828,7 @@ app.get('/', (req, res) => {
             <div id="offset-tab" style="display:none;">
                 <div class="panel">
                     <h2 style="color: #1a73e8;">Live Accumulation Grouping (Dynamic Peak Harvester)</h2>
-                    <p style="font-size:0.85em; color:#5f6368; margin-top:-8px; margin-bottom:16px;">This engine scans the "Group Accumulation" column to find the exact row where the profit hits its peak. If that peak reaches your Target AND the 5th Bottom Row (overall sum minus bottom 4) is positive, it chops the list right there and closes those profitable pairs.</p>
+                    <p style="font-size:0.85em; color:#5f6368; margin-top:-8px; margin-bottom:16px;">This engine scans the "Group Accumulation" column to find the exact row where the profit hits its peak. If that peak reaches your Target AND your configured Nth Bottom Row (overall sum minus bottom N-1) is positive, it chops the list right there and closes those profitable pairs.</p>
                     <div id="liveOffsetsContainer">Waiting for live data...</div>
                 </div>
                 
@@ -898,6 +901,11 @@ app.get('/', (req, res) => {
                                 <label style="margin-top:0;">Manual Offset Net Profit Target V1 ($)</label>
                                 <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Groups Pair 1 + Pair 2 + Pair 3 etc. Closes the entire bucket of coins if the cumulative Group Net PNL >= this amount.</p>
                                 <input type="number" step="0.1" id="smartOffsetNetProfit" placeholder="e.g. 1.00 (0 = Disabled)">
+                            </div>
+                            <div style="margin-top: 12px;">
+                                <label style="margin-top:0;">Required Nth Bottom Row for Peak Harvest (V1)</label>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">The dynamic peak profit is only harvested if the accumulation at this specific row from the bottom is > 0. (Default is 5).</p>
+                                <input type="number" step="1" id="smartOffsetBottomRowV1" placeholder="e.g. 5">
                             </div>
                             <div style="margin-top: 12px;">
                                 <label style="margin-top:0;">Manual Offset Stop Loss V1 ($)</label>
@@ -1012,6 +1020,7 @@ app.get('/', (req, res) => {
             let myGlobalTargetPnl = 0;
             let myGlobalTrailingPnl = 0;
             let mySmartOffsetNetProfit = 0;
+            let mySmartOffsetBottomRowV1 = 5;
             let mySmartOffsetStopLoss = 0;
             let mySmartOffsetNetProfit2 = 0;
             let mySmartOffsetStopLoss2 = 0;
@@ -1084,6 +1093,7 @@ app.get('/', (req, res) => {
                 myGlobalTargetPnl = config.globalTargetPnl || 0;
                 myGlobalTrailingPnl = config.globalTrailingPnl || 0;
                 mySmartOffsetNetProfit = config.smartOffsetNetProfit || 0;
+                mySmartOffsetBottomRowV1 = config.smartOffsetBottomRowV1 !== undefined ? config.smartOffsetBottomRowV1 : 5;
                 mySmartOffsetStopLoss = config.smartOffsetStopLoss || 0;
                 mySmartOffsetNetProfit2 = config.smartOffsetNetProfit2 || 0;
                 mySmartOffsetStopLoss2 = config.smartOffsetStopLoss2 || 0;
@@ -1092,6 +1102,7 @@ app.get('/', (req, res) => {
                 document.getElementById('globalTargetPnl').value = myGlobalTargetPnl;
                 document.getElementById('globalTrailingPnl').value = myGlobalTrailingPnl;
                 document.getElementById('smartOffsetNetProfit').value = mySmartOffsetNetProfit;
+                document.getElementById('smartOffsetBottomRowV1').value = mySmartOffsetBottomRowV1;
                 document.getElementById('smartOffsetStopLoss').value = mySmartOffsetStopLoss;
                 document.getElementById('smartOffsetNetProfit2').value = mySmartOffsetNetProfit2;
                 document.getElementById('smartOffsetStopLoss2').value = mySmartOffsetStopLoss2;
@@ -1113,12 +1124,13 @@ app.get('/', (req, res) => {
                 myGlobalTargetPnl = parseFloat(document.getElementById('globalTargetPnl').value) || 0;
                 myGlobalTrailingPnl = parseFloat(document.getElementById('globalTrailingPnl').value) || 0;
                 mySmartOffsetNetProfit = parseFloat(document.getElementById('smartOffsetNetProfit').value) || 0;
+                mySmartOffsetBottomRowV1 = parseInt(document.getElementById('smartOffsetBottomRowV1').value) || 5;
                 mySmartOffsetStopLoss = parseFloat(document.getElementById('smartOffsetStopLoss').value) || 0;
                 mySmartOffsetNetProfit2 = parseFloat(document.getElementById('smartOffsetNetProfit2').value) || 0;
                 mySmartOffsetStopLoss2 = parseFloat(document.getElementById('smartOffsetStopLoss2').value) || 0;
                 mySmartOffsetMaxLossPerMinute = parseFloat(document.getElementById('smartOffsetMaxLossPerMinute').value) || 0;
                 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved Successfully!');
             }
@@ -1138,7 +1150,7 @@ app.get('/', (req, res) => {
                 
                 mySubAccounts.push({ name, apiKey: key, secret: secret, side: 'long', leverage: 10, baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });
                 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -1182,7 +1194,7 @@ app.get('/', (req, res) => {
                 const index = parseInt(select.value);
                 if(!isNaN(index) && index >= 0) {
                     mySubAccounts.splice(index, 1);
-                    const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute };
+                    const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute };
                     const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                     const json = await res.json();
                     mySubAccounts = json.settings.subAccounts || [];
@@ -1264,7 +1276,7 @@ app.get('/', (req, res) => {
                 profile.maxContracts = parseInt(document.getElementById('maxContracts').value);
                 profile.coins = myCoins;
 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -1368,6 +1380,7 @@ app.get('/', (req, res) => {
 
                     const targetV1 = globalSet.smartOffsetNetProfit || 0;
                     const stopLossV1 = globalSet.smartOffsetStopLoss || 0;
+                    const bottomRowN = globalSet.smartOffsetBottomRowV1 !== undefined ? globalSet.smartOffsetBottomRowV1 : 5;
 
                     if (totalPairs === 0) {
                         document.getElementById('liveOffsetsContainer').innerHTML = '<p style="color:#5f6368;">Not enough active trades to form pairs.</p>';
@@ -1378,9 +1391,9 @@ app.get('/', (req, res) => {
                         let runningAccumulation = 0;
                         let peakAccumulation = 0;
                         let peakRowIndex = -1;
-                        let fifthBottomAccumulation = 0;
+                        let nthBottomAccumulation = 0;
                         
-                        const targetRefIndex = Math.max(0, totalPairs - 5);
+                        const targetRefIndex = Math.max(0, totalPairs - bottomRowN);
 
                         // Calculate the peak first
                         for (let i = 0; i < totalPairs; i++) {
@@ -1395,30 +1408,30 @@ app.get('/', (req, res) => {
                             }
                             
                             if (i === targetRefIndex) {
-                                fifthBottomAccumulation = runningAccumulation;
+                                nthBottomAccumulation = runningAccumulation;
                             }
                         }
 
-                        // Condition is now based on the 5th bottom row
-                        const isFifthBottomPositive = fifthBottomAccumulation > 0;
+                        // Condition is now based on the Nth bottom row
+                        const isNthBottomPositive = nthBottomAccumulation > 0;
 
                         let topStatusMessage = '';
                         let executingPeak = false;
                         let executingSl = false;
 
                         if (targetV1 > 0 && peakAccumulation >= targetV1 && peakRowIndex >= 0) {
-                            if (isFifthBottomPositive) {
-                                topStatusMessage = \`<span style="color:#1e8e3e; font-weight:bold;">🔥 Target Reached & 5th Bottom Row > 0! Slicing at Row \${peakRowIndex + 1} to harvest Peak Profit ($\${peakAccumulation.toFixed(4)})!</span>\`;
+                            if (isNthBottomPositive) {
+                                topStatusMessage = \`<span style="color:#1e8e3e; font-weight:bold;">🔥 Target Reached & Row \${bottomRowN} from bottom > 0! Slicing at Row \${peakRowIndex + 1} to harvest Peak Profit ($\${peakAccumulation.toFixed(4)})!</span>\`;
                                 executingPeak = true;
                             } else {
-                                topStatusMessage = \`TP Status: <span style="color:#d93025; font-weight:bold;">⏸️ Peak found (+\$\${peakAccumulation.toFixed(4)}) but 5th Bottom Row is <= 0</span>\`;
+                                topStatusMessage = \`TP Status: <span style="color:#d93025; font-weight:bold;">⏸️ Peak found (+\$\${peakAccumulation.toFixed(4)}) but Row \${bottomRowN} from bottom is <= 0</span>\`;
                             }
                         } else if (stopLossV1 < 0 && runningAccumulation <= stopLossV1) {
                             topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">🔥 Stop Loss Hit for the whole group!</span>\`;
                             executingSl = true;
                         } else {
                             let pColor = peakAccumulation > 0 ? '#1e8e3e' : '#5f6368';
-                            topStatusMessage = \`TP Status: <span style="color:#1a73e8; font-weight:bold;">🔎 Seeking Peak &ge; $\${targetV1.toFixed(4)} (Requires 5th Bottom Row > 0)</span> | Current Peak: <strong style="color:\${pColor}">+\$\${peakAccumulation.toFixed(4)}</strong>\`;
+                            topStatusMessage = \`TP Status: <span style="color:#1a73e8; font-weight:bold;">🔎 Seeking Peak &ge; $\${targetV1.toFixed(4)} (Requires Row \${bottomRowN} from bottom > 0)</span> | Current Peak: <strong style="color:\${pColor}">+\$\${peakAccumulation.toFixed(4)}</strong>\`;
                         }
 
                         let displayAccumulation = 0;
