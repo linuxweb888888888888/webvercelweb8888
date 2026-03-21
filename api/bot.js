@@ -125,7 +125,7 @@ function startBot(userId, subAccount) {
     });
     
     // NOTE: INJECTED PAPER TRADING STATE
-    const state = { logs: [], coinStates: {}, simulatedPositions: [] };
+    const state = { logs: [], coinStates: {}, simulatedPositions: [], marketsLoaded: false };
     let isProcessing = false;
     let lastError = '';
 
@@ -146,14 +146,19 @@ function startBot(userId, subAccount) {
         } else {
             let pos = state.simulatedPositions.find(p => p.symbol === symbol);
             const currentPrice = state.coinStates[symbol]?.currentPrice || 1; 
+            
+            // Apply REAL Contract Size from Exchange to fix PNL math
+            const market = exchange.markets ? exchange.markets[symbol] : null;
+            const realContractSize = market && market.contractSize ? market.contractSize : 1;
+
             if (!pos) {
-                pos = { symbol, side: posSide, contracts: 0, entryPrice: currentPrice, contractSize: 1 };
+                pos = { symbol, side: posSide, contracts: 0, entryPrice: currentPrice, contractSize: realContractSize };
                 state.simulatedPositions.push(pos);
             }
             const totalCost = (pos.contracts * pos.entryPrice) + (amount * currentPrice);
             pos.contracts += amount;
             pos.entryPrice = totalCost / pos.contracts;
-            logForProfile(profileId, `[PAPER TRADE] Virtual Order: ${side} ${amount} ${symbol} @ ~${currentPrice}`);
+            logForProfile(profileId, `[PAPER TRADE] Virtual Order: ${side} ${amount} ${symbol} @ ~${currentPrice} (Contract Multiplier: ${realContractSize})`);
         }
         return { id: 'sim_' + Date.now(), info: {} };
     };
@@ -164,6 +169,18 @@ function startBot(userId, subAccount) {
     const intervalId = setInterval(async () => {
         if (isProcessing) return; 
         isProcessing = true;
+
+        // LOAD REAL MARKET DATA FOR ACCURATE PAPER PNL
+        if (!state.marketsLoaded) {
+            try {
+                await exchange.loadMarkets();
+                state.marketsLoaded = true;
+                logForProfile(profileId, `📊 Loaded real market contract sizes for accurate Paper Trading PNL.`);
+            } catch(e) {
+                isProcessing = false;
+                return;
+            }
+        }
 
         const botData = activeBots.get(profileId);
         if (!botData) {
