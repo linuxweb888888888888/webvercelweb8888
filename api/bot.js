@@ -315,7 +315,9 @@ setInterval(async () => {
             if (dynamicDivisor <= 0 || isNaN(dynamicDivisor)) dynamicDivisor = 1;
 
             const dynamicTargetV1 = smartOffsetNetProfit > 0 ? (smartOffsetNetProfit / dynamicDivisor) : 0;
+            const dynamicStopLossV1 = smartOffsetStopLoss < 0 ? (smartOffsetStopLoss / dynamicDivisor) : 0;
             const dynamicTargetV2 = smartOffsetNetProfit2 > 0 ? (smartOffsetNetProfit2 / dynamicDivisor) : 0;
+            const dynamicStopLossV2 = smartOffsetStopLoss2 < 0 ? (smartOffsetStopLoss2 / dynamicDivisor) : 0;
 
             let offsetExecuted = false;
 
@@ -341,11 +343,11 @@ setInterval(async () => {
                     if (smartOffsetNetProfit > 0 && netResult >= dynamicTargetV1) {
                         triggerOffset = true;
                         reason = `TAKE PROFIT (Dyn: $${dynamicTargetV1.toFixed(4)})`;
-                    } else if (smartOffsetStopLoss < 0 && netResult <= smartOffsetStopLoss) {
+                    } else if (smartOffsetStopLoss < 0 && netResult <= dynamicStopLossV1) {
                         // Rate Limiter: Maximum 1 Stop Loss per minute across V1 and V2
                         if (Date.now() - (lastStopLossExecutions.get(dbUserId) || 0) >= 60000) {
                             triggerOffset = true;
-                            reason = 'STOP LOSS';
+                            reason = `STOP LOSS (Dyn: $${dynamicStopLossV1.toFixed(4)})`;
                             lastStopLossExecutions.set(dbUserId, Date.now());
                         }
                     }
@@ -402,11 +404,11 @@ setInterval(async () => {
                     if (smartOffsetNetProfit2 > 0 && netResult >= dynamicTargetV2) {
                         triggerOffset = true;
                         reason = `TAKE PROFIT V2 (Dyn: $${dynamicTargetV2.toFixed(4)})`;
-                    } else if (smartOffsetStopLoss2 < 0 && netResult <= smartOffsetStopLoss2) {
+                    } else if (smartOffsetStopLoss2 < 0 && netResult <= dynamicStopLossV2) {
                         // Rate Limiter: Maximum 1 Stop Loss per minute across V1 and V2
                         if (Date.now() - (lastStopLossExecutions.get(dbUserId) || 0) >= 60000) {
                             triggerOffset = true;
-                            reason = 'STOP LOSS (V2)';
+                            reason = `STOP LOSS V2 (Dyn: $${dynamicStopLossV2.toFixed(4)})`;
                             lastStopLossExecutions.set(dbUserId, Date.now());
                         }
                     }
@@ -1238,16 +1240,19 @@ app.get('/', (req, res) => {
                     const totalPairs = Math.floor(totalCoins / 2);
 
                     const currentTarget = globalSet.smartOffsetNetProfit || 0;
+                    const currentSl = globalSet.smartOffsetStopLoss || 0;
                     let dynamicTargetV1 = currentTarget > 0 ? (currentTarget / dynamicDivisor) : 0;
+                    let dynamicSlV1 = currentSl < 0 ? (currentSl / dynamicDivisor) : 0;
 
                     if (totalPairs === 0) {
                         document.getElementById('liveOffsetsContainer').innerHTML = '<p style="color:#5f6368;">Not enough active trades to form pairs.</p>';
                     } else {
                         let dynamicInfoHtml = \`<div style="margin-bottom: 12px; padding: 10px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 4px; color: #1a73e8; font-weight: 500;">
-                            Dynamic Take Profit Target: $\${dynamicTargetV1.toFixed(4)} 
-                            <span style="font-size: 0.85em; color: #5f6368; font-weight: normal;">
-                                (Formula: Target $\${currentTarget.toFixed(2)} / (Total Active Coins \${totalAllCoinsUser} / Trading Coins \${totalTrading}))
-                            </span>
+                            <div style="margin-bottom: 4px;">🎯 Dynamic Take Profit: $\${dynamicTargetV1.toFixed(4)} <span style="font-size: 0.85em; color: #5f6368; font-weight: normal;">(Base: $\${currentTarget.toFixed(2)})</span></div>
+                            <div>🛑 Dynamic Stop Loss: $\${dynamicSlV1.toFixed(4)} <span style="font-size: 0.85em; color: #5f6368; font-weight: normal;">(Base: $\${currentSl.toFixed(2)})</span></div>
+                            <div style="font-size: 0.85em; color: #5f6368; font-weight: normal; margin-top: 6px;">
+                                Formula: Base Target / (Total Active Coins \${totalAllCoinsUser} / Trading Coins \${totalTrading})
+                            </div>
                         </div>\`;
 
                         let liveHtml = '<table style="width:100%; text-align:left; border-collapse:collapse; background:#fff; border-radius:6px; overflow:hidden;">';
@@ -1261,14 +1266,12 @@ app.get('/', (req, res) => {
                             const l = activeCandidates[loserIndex];
                             const net = w.pnl + l.pnl;
 
-                            const currentSl = globalSet.smartOffsetStopLoss || 0;
-
                             const wColor = w.pnl >= 0 ? '#1e8e3e' : '#d93025';
                             const lColor = l.pnl >= 0 ? '#1e8e3e' : '#d93025';
                             const nColor = net >= 0 ? '#1e8e3e' : '#d93025';
                             
                             const isTargetHit = (currentTarget > 0 && net >= dynamicTargetV1);
-                            const isStopHit = (currentSl < 0 && net <= currentSl);
+                            const isStopHit = (currentSl < 0 && net <= dynamicSlV1);
                             const statusIcon = (isTargetHit || isStopHit) ? '🔥 Executing...' : '⏳ Evaluating';
 
                             liveHtml += \`<tr>
@@ -1299,16 +1302,19 @@ app.get('/', (req, res) => {
                     const totalPairs = Math.floor(totalCoins / 2);
 
                     const currentTarget2 = globalSet.smartOffsetNetProfit2 || 0;
+                    const currentSl2 = globalSet.smartOffsetStopLoss2 || 0;
                     let dynamicTargetV2 = currentTarget2 > 0 ? (currentTarget2 / dynamicDivisor) : 0;
+                    let dynamicSlV2 = currentSl2 < 0 ? (currentSl2 / dynamicDivisor) : 0;
 
                     if (totalPairs === 0) {
                         document.getElementById('liveOffsetsContainer2').innerHTML = '<p style="color:#5f6368;">Not enough active trades to form pairs.</p>';
                     } else {
                         let dynamicInfoHtml2 = \`<div style="margin-bottom: 12px; padding: 10px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 4px; color: #1a73e8; font-weight: 500;">
-                            Dynamic Take Profit Target V2: $\${dynamicTargetV2.toFixed(4)} 
-                            <span style="font-size: 0.85em; color: #5f6368; font-weight: normal;">
-                                (Formula: Target $\${currentTarget2.toFixed(2)} / (Total Active Coins \${totalAllCoinsUser} / Trading Coins \${totalTrading}))
-                            </span>
+                            <div style="margin-bottom: 4px;">🎯 Dynamic Take Profit V2: $\${dynamicTargetV2.toFixed(4)} <span style="font-size: 0.85em; color: #5f6368; font-weight: normal;">(Base: $\${currentTarget2.toFixed(2)})</span></div>
+                            <div>🛑 Dynamic Stop Loss V2: $\${dynamicSlV2.toFixed(4)} <span style="font-size: 0.85em; color: #5f6368; font-weight: normal;">(Base: $\${currentSl2.toFixed(2)})</span></div>
+                            <div style="font-size: 0.85em; color: #5f6368; font-weight: normal; margin-top: 6px;">
+                                Formula: Base Target / (Total Active Coins \${totalAllCoinsUser} / Trading Coins \${totalTrading})
+                            </div>
                         </div>\`;
 
                         let liveHtml = '<table style="width:100%; text-align:left; border-collapse:collapse; background:#fff; border-radius:6px; overflow:hidden;">';
@@ -1322,14 +1328,12 @@ app.get('/', (req, res) => {
                             const l = activeCandidates[loserIndex];
                             const net = w.pnl + l.pnl;
 
-                            const currentSl = globalSet.smartOffsetStopLoss2 || 0;
-
                             const wColor = w.pnl >= 0 ? '#1e8e3e' : '#d93025';
                             const lColor = l.pnl >= 0 ? '#1e8e3e' : '#d93025';
                             const nColor = net >= 0 ? '#1e8e3e' : '#d93025';
                             
                             const isTargetHit = (currentTarget2 > 0 && net >= dynamicTargetV2);
-                            const isStopHit = (currentSl < 0 && net <= currentSl);
+                            const isStopHit = (currentSl2 < 0 && net <= dynamicSlV2);
                             const statusIcon = (isTargetHit || isStopHit) ? '🔥 Executing...' : '⏳ Evaluating';
 
                             liveHtml += \`<tr>
