@@ -338,6 +338,12 @@ setInterval(async () => {
                 } else {
                     rawMin = 0; rawMax = 0;
                 }
+
+                // NEW: If Auto-Dynamic calculates identical values (or 0), fallback to 0.0006 and 0.0004
+                if (rawMin === rawMax) {
+                    rawMax = 0.0006;
+                    rawMin = 0.0004;
+                }
             }
 
             if (!autoDynamic && rawMin === 0 && rawMax === 0) continue;
@@ -1516,6 +1522,13 @@ app.get('/', (req, res) => {
                         dynamicMin = sortedCands[pIdx + 1].pnl;
                         hasDynamicBoundary = true;
                     }
+                }
+
+                // NEW: If Auto-Dynamic calculates identical values (or no boundary), fallback to 0.0006 and 0.0004 for the UI
+                if (!hasDynamicBoundary || dynamicMin === dynamicMax) {
+                    dynamicMax = 0.0006;
+                    dynamicMin = 0.0004;
+                    hasDynamicBoundary = true; // Force UI to display these fallback values
                 }
 
                 const autoDynCheckbox = document.getElementById('minuteCloseAutoDynamic');
