@@ -66,6 +66,7 @@ const SettingsSchema = new mongoose.Schema({
     smartOffsetNetProfit2: { type: Number, default: 0 }, 
     smartOffsetStopLoss2: { type: Number, default: 0 },   
     smartOffsetMaxLossPerMinute: { type: Number, default: 0 }, 
+    minuteCloseAutoDynamic: { type: Boolean, default: false },
     minuteCloseMinPnl: { type: Number, default: 0 },
     minuteCloseMaxPnl: { type: Number, default: 0 },
     subAccounts: [SubAccountSchema]
@@ -291,44 +292,77 @@ setInterval(async () => {
         await connectDB();
         const usersSettings = await Settings.find({});
         for (let userSetting of usersSettings) {
-            const rawMin = parseFloat(userSetting.minuteCloseMinPnl) || 0;
-            const rawMax = parseFloat(userSetting.minuteCloseMaxPnl) || 0;
+            const dbUserId = String(userSetting.userId);
+            let rawMin = parseFloat(userSetting.minuteCloseMinPnl) || 0;
+            let rawMax = parseFloat(userSetting.minuteCloseMaxPnl) || 0;
+            const autoDynamic = userSetting.minuteCloseAutoDynamic || false;
             
-            if (rawMin === 0 && rawMax === 0) continue; // Disabled if both are 0
+            // Gather all positions first so we can calculate the peak boundary dynamically
+            let activeCandidates = [];
+            for (let [profileId, botData] of activeBots.entries()) {
+                if (botData.userId !== dbUserId) continue;
+                for (let symbol in botData.state.coinStates) {
+                    const cState = botData.state.coinStates[symbol];
+                    if (cState.status === 'Running' && cState.contracts > 0 && (!cState.lockUntil || Date.now() >= cState.lockUntil)) {
+                        activeCandidates.push({
+                            profileId, symbol, exchange: botData.exchange,
+                            pnl: parseFloat(cState.unrealizedPnl) || 0,
+                            contracts: cState.contracts,
+                            subAccount: botData.settings,
+                            cState: cState
+                        });
+                    }
+                }
+            }
+
+            if (autoDynamic && activeCandidates.length >= 2) {
+                activeCandidates.sort((a, b) => b.pnl - a.pnl);
+                const totalCoins = activeCandidates.length;
+                const totalPairs = Math.floor(totalCoins / 2);
+                let runningAccumulation = 0;
+                let peakAccumulation = 0;
+                let peakRowIndex = -1;
+
+                for (let i = 0; i < totalPairs; i++) {
+                    const netResult = activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl;
+                    runningAccumulation += netResult;
+                    if (runningAccumulation > peakAccumulation) {
+                        peakAccumulation = runningAccumulation;
+                        peakRowIndex = i;
+                    }
+                }
+
+                if (peakRowIndex >= 0 && peakRowIndex + 1 < totalPairs) {
+                    rawMax = activeCandidates[peakRowIndex].pnl;
+                    rawMin = activeCandidates[peakRowIndex + 1].pnl;
+                } else {
+                    rawMin = 0; rawMax = 0;
+                }
+            }
+
+            if (!autoDynamic && rawMin === 0 && rawMax === 0) continue;
+            if (autoDynamic && rawMin === 0 && rawMax === 0) continue; 
 
             const actualMin = Math.min(rawMin, rawMax);
             const actualMax = Math.max(rawMin, rawMax);
-            
-            const dbUserId = String(userSetting.userId);
-            
-            for (let [profileId, botData] of activeBots.entries()) {
-                if (botData.userId !== dbUserId) continue;
-                
-                for (let symbol in botData.state.coinStates) {
-                    const cState = botData.state.coinStates[symbol];
+
+            for (let pos of activeCandidates) {
+                if (pos.pnl >= actualMin && pos.pnl <= actualMax) {
+                    logForProfile(pos.profileId, `[${pos.symbol}] ⏳ 1-Min Range Closer: PNL $${pos.pnl.toFixed(4)} is in boundary ($${actualMin.toFixed(4)} to $${actualMax.toFixed(4)}). Closing position.`);
                     
-                    // Check if running and not locked
-                    if (cState.status === 'Running' && cState.contracts > 0 && (!cState.lockUntil || Date.now() >= cState.lockUntil)) {
-                        const pnl = parseFloat(cState.unrealizedPnl) || 0;
-                        
-                        if (pnl >= actualMin && pnl <= actualMax) {
-                            logForProfile(profileId, `[${symbol}] ⏳ 1-Min Range Closer: PNL $${pnl.toFixed(4)} is between $${actualMin} and $${actualMax}. Closing position.`);
-                            
-                            cState.lockUntil = Date.now() + 8000;
-                            const contractsToClose = cState.contracts;
-                            cState.contracts = 0;
-                            cState.unrealizedPnl = 0;
-                            cState.currentRoi = 0;
+                    pos.cState.lockUntil = Date.now() + 8000;
+                    const contractsToClose = pos.contracts;
+                    pos.cState.contracts = 0;
+                    pos.cState.unrealizedPnl = 0;
+                    pos.cState.currentRoi = 0;
 
-                            const activeSide = botData.settings.coins.find(c => c.symbol === symbol)?.side || botData.settings.side;
-                            const orderSide = activeSide === 'long' ? 'sell' : 'buy';
-                            
-                            botData.exchange.createOrder(symbol, 'market', orderSide, contractsToClose, undefined, { offset: 'close', reduceOnly: true, lever_rate: botData.settings.leverage }).catch(()=>{});
+                    const activeSide = pos.subAccount.coins.find(c => c.symbol === pos.symbol)?.side || pos.subAccount.side;
+                    const orderSide = activeSide === 'long' ? 'sell' : 'buy';
+                    
+                    pos.exchange.createOrder(pos.symbol, 'market', orderSide, contractsToClose, undefined, { offset: 'close', reduceOnly: true, lever_rate: pos.subAccount.leverage }).catch(()=>{});
 
-                            botData.settings.realizedPnl = (botData.settings.realizedPnl || 0) + pnl;
-                            Settings.updateOne({ "subAccounts._id": botData.settings._id }, { $set: { "subAccounts.$.realizedPnl": botData.settings.realizedPnl } }).catch(()=>{});
-                        }
-                    }
+                    pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.pnl;
+                    Settings.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                 }
             }
         }
@@ -700,7 +734,7 @@ app.post('/api/register', async (req, res) => {
         const { username, password } = req.body;
         const hashedPassword = await bcrypt.hash(password, 10);
         const user = await User.create({ username, password: hashedPassword });
-        await Settings.create({ userId: user._id, subAccounts: [], globalTargetPnl: 0, globalTrailingPnl: 0, smartOffsetNetProfit: 0, smartOffsetBottomRowV1: 5, smartOffsetStopLoss: 0, smartOffsetNetProfit2: 0, smartOffsetStopLoss2: 0, smartOffsetMaxLossPerMinute: 0, minuteCloseMinPnl: 0, minuteCloseMaxPnl: 0 });
+        await Settings.create({ userId: user._id, subAccounts: [], globalTargetPnl: 0, globalTrailingPnl: 0, smartOffsetNetProfit: 0, smartOffsetBottomRowV1: 5, smartOffsetStopLoss: 0, smartOffsetNetProfit2: 0, smartOffsetStopLoss2: 0, smartOffsetMaxLossPerMinute: 0, minuteCloseAutoDynamic: false, minuteCloseMinPnl: 0, minuteCloseMaxPnl: 0 });
         res.json({ success: true, message: 'Registration successful!' });
     } catch (err) {
         res.status(400).json({ error: 'Username already exists or invalid data.' });
@@ -722,7 +756,7 @@ app.get('/api/settings', authMiddleware, async (req, res) => {
 });
 
 app.post('/api/settings', authMiddleware, async (req, res) => {
-    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, minuteCloseMinPnl, minuteCloseMaxPnl } = req.body;
+    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, minuteCloseAutoDynamic, minuteCloseMinPnl, minuteCloseMaxPnl } = req.body;
     
     const existingSettings = await Settings.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -759,6 +793,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             smartOffsetNetProfit2: parseFloat(smartOffsetNetProfit2) || 0,
             smartOffsetStopLoss2: parsedStopLoss2,
             smartOffsetMaxLossPerMinute: parseFloat(smartOffsetMaxLossPerMinute) || 0,
+            minuteCloseAutoDynamic: minuteCloseAutoDynamic === true,
             minuteCloseMinPnl: parseFloat(minuteCloseMinPnl) || 0,
             minuteCloseMaxPnl: parseFloat(minuteCloseMaxPnl) || 0
         }, 
@@ -976,8 +1011,11 @@ app.get('/', (req, res) => {
                                 <input type="number" step="0.1" id="smartOffsetMaxLossPerMinute" placeholder="e.g. 10.00 (0 = classic 1 per min rule)">
                             </div>
                             <div style="margin-top: 12px; border-top: 1px solid #cce0ff; padding-top: 12px;">
-                                <label style="margin-top:0;">1-Minute Interval: Close Positions Between PNL ($)</label>
-                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Checks every 60 seconds. Closes any single position if its PNL is exactly between these two values.</p>
+                                <label style="margin-top:0; display:flex; align-items:center;">
+                                    1-Minute Interval: Close Positions Between PNL ($)
+                                    <input type="checkbox" id="minuteCloseAutoDynamic" style="width:auto; margin-left:12px; margin-right:4px;"> Auto-Dynamic
+                                </label>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Checks every 60s. Check Auto-Dynamic to continually intercept the precise Winner PNL where 📈 Part of Peak switches to 📉 Dragging down.</p>
                                 <div class="flex-row">
                                     <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseMinPnl" placeholder="Min PNL (e.g. 0.0001)"></div>
                                     <div style="flex:1;"><input type="number" step="0.0001" id="minuteCloseMaxPnl" placeholder="Max PNL (e.g. 0.0004)"></div>
@@ -1091,6 +1129,7 @@ app.get('/', (req, res) => {
             let mySmartOffsetNetProfit2 = 0;
             let mySmartOffsetStopLoss2 = 0;
             let mySmartOffsetMaxLossPerMinute = 0;
+            let myMinuteCloseAutoDynamic = false;
             let myMinuteCloseMinPnl = 0;
             let myMinuteCloseMaxPnl = 0;
             let currentProfileIndex = -1;
@@ -1166,6 +1205,7 @@ app.get('/', (req, res) => {
                 mySmartOffsetNetProfit2 = config.smartOffsetNetProfit2 || 0;
                 mySmartOffsetStopLoss2 = config.smartOffsetStopLoss2 || 0;
                 mySmartOffsetMaxLossPerMinute = config.smartOffsetMaxLossPerMinute || 0;
+                myMinuteCloseAutoDynamic = config.minuteCloseAutoDynamic || false;
                 myMinuteCloseMinPnl = config.minuteCloseMinPnl || 0;
                 myMinuteCloseMaxPnl = config.minuteCloseMaxPnl || 0;
                 
@@ -1177,6 +1217,7 @@ app.get('/', (req, res) => {
                 document.getElementById('smartOffsetNetProfit2').value = mySmartOffsetNetProfit2;
                 document.getElementById('smartOffsetStopLoss2').value = mySmartOffsetStopLoss2;
                 document.getElementById('smartOffsetMaxLossPerMinute').value = mySmartOffsetMaxLossPerMinute;
+                document.getElementById('minuteCloseAutoDynamic').checked = myMinuteCloseAutoDynamic;
                 document.getElementById('minuteCloseMinPnl').value = myMinuteCloseMinPnl;
                 document.getElementById('minuteCloseMaxPnl').value = myMinuteCloseMaxPnl;
 
@@ -1201,10 +1242,11 @@ app.get('/', (req, res) => {
                 mySmartOffsetNetProfit2 = parseFloat(document.getElementById('smartOffsetNetProfit2').value) || 0;
                 mySmartOffsetStopLoss2 = parseFloat(document.getElementById('smartOffsetStopLoss2').value) || 0;
                 mySmartOffsetMaxLossPerMinute = parseFloat(document.getElementById('smartOffsetMaxLossPerMinute').value) || 0;
+                myMinuteCloseAutoDynamic = document.getElementById('minuteCloseAutoDynamic').checked;
                 myMinuteCloseMinPnl = parseFloat(document.getElementById('minuteCloseMinPnl').value) || 0;
                 myMinuteCloseMaxPnl = parseFloat(document.getElementById('minuteCloseMaxPnl').value) || 0;
                 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved Successfully!');
             }
@@ -1224,7 +1266,7 @@ app.get('/', (req, res) => {
                 
                 mySubAccounts.push({ name, apiKey: key, secret: secret, side: 'long', leverage: 10, baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });
                 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -1268,7 +1310,7 @@ app.get('/', (req, res) => {
                 const index = parseInt(select.value);
                 if(!isNaN(index) && index >= 0) {
                     mySubAccounts.splice(index, 1);
-                    const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
+                    const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
                     const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                     const json = await res.json();
                     mySubAccounts = json.settings.subAccounts || [];
@@ -1350,7 +1392,7 @@ app.get('/', (req, res) => {
                 profile.maxContracts = parseInt(document.getElementById('maxContracts').value);
                 profile.coins = myCoins;
 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -1446,6 +1488,59 @@ app.get('/', (req, res) => {
                     ? \`<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>60s Loss Tracker:</strong> $\${currentMinuteLoss.toFixed(2)} / $\${maxLossPerMin.toFixed(2)} Limit</div>\`
                     : \`<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>60s Loss Tracker:</strong> Limited to 1 SL execution per minute</div>\`;
                 
+                // ==========================================
+                // DYNAMIC 1-MINUTE CLOSER UI SYNC 
+                // ==========================================
+                let dynamicMax = 0;
+                let dynamicMin = 0;
+                let hasDynamicBoundary = false;
+
+                if (activeCandidates.length >= 2) {
+                    let sortedCands = [...activeCandidates].sort((a, b) => b.pnl - a.pnl);
+                    let tCoins = sortedCands.length;
+                    let tPairs = Math.floor(tCoins / 2);
+                    let rAcc = 0;
+                    let pAcc = 0;
+                    let pIdx = -1;
+                    
+                    for (let i = 0; i < tPairs; i++) {
+                        let net = sortedCands[i].pnl + sortedCands[tCoins - tPairs + i].pnl;
+                        rAcc += net;
+                        if (rAcc > pAcc) {
+                            pAcc = rAcc;
+                            pIdx = i;
+                        }
+                    }
+                    if (pIdx >= 0 && pIdx + 1 < tPairs) {
+                        dynamicMax = sortedCands[pIdx].pnl;
+                        dynamicMin = sortedCands[pIdx + 1].pnl;
+                        hasDynamicBoundary = true;
+                    }
+                }
+
+                const autoDynCheckbox = document.getElementById('minuteCloseAutoDynamic');
+                const minInput = document.getElementById('minuteCloseMinPnl');
+                const maxInput = document.getElementById('minuteCloseMaxPnl');
+
+                if (autoDynCheckbox && autoDynCheckbox.checked) {
+                    minInput.disabled = true;
+                    maxInput.disabled = true;
+                    minInput.style.backgroundColor = '#e8eaed';
+                    maxInput.style.backgroundColor = '#e8eaed';
+                    if (hasDynamicBoundary) {
+                        minInput.value = Math.min(dynamicMin, dynamicMax).toFixed(4);
+                        maxInput.value = Math.max(dynamicMin, dynamicMax).toFixed(4);
+                    } else {
+                        minInput.value = '';
+                        maxInput.value = '';
+                    }
+                } else if (autoDynCheckbox) {
+                    minInput.disabled = false;
+                    maxInput.disabled = false;
+                    minInput.style.backgroundColor = '#fafafa';
+                    maxInput.style.backgroundColor = '#fafafa';
+                }
+
                 // --- RENDER LIVE SMART OFFSET TRADES (V1 - GROUP ACCUMULATION) ---
                 if (document.getElementById('offset-tab').style.display === 'block') {
                     activeCandidates.sort((a, b) => b.pnl - a.pnl);
