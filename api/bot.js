@@ -1,5 +1,3 @@
-//web8888
-
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -490,14 +488,13 @@ setInterval(async () => {
                     }
                 }
 
-                const isNthBottomPositive = nthBottomAccumulation > 0;
-
                 let triggerOffset = false;
                 let reason = '';
                 let finalPairsToClose = [];
                 let finalNetProfit = 0;
 
-                if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation > 0 && peakRowIndex >= 0 && isNthBottomPositive) {
+                // Take Profit triggered immediately when Peak is found without Nth Row requirement
+                if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation > 0 && peakRowIndex >= 0) {
                     triggerOffset = true;
                     reason = `TAKE PROFIT (Harvested Peak at Row ${peakRowIndex + 1}, Target: $${targetV1.toFixed(4)})`;
                     finalNetProfit = peakAccumulation;
@@ -953,7 +950,7 @@ app.get('/', (req, res) => {
             <div id="offset-tab" style="display:none;">
                 <div class="panel">
                     <h2 style="color: #1a73e8;">Live Accumulation Grouping (Dynamic Peak Harvester)</h2>
-                    <p style="font-size:0.85em; color:#5f6368; margin-top:-8px; margin-bottom:16px;">This engine scans the "Group Accumulation" column to find the exact row where the profit hits its peak. If that peak reaches your Target AND your configured Nth Bottom Row (overall sum minus bottom N-1) is positive, it chops the list right there and closes those profitable pairs.</p>
+                    <p style="font-size:0.85em; color:#5f6368; margin-top:-8px; margin-bottom:16px;">This engine scans the "Group Accumulation" column to find the exact row where the profit hits its peak. If that peak reaches your Target, it chops the list right there and closes those profitable pairs.</p>
                     <div id="liveOffsetsContainer">Waiting for live data...</div>
                 </div>
                 
@@ -1028,8 +1025,8 @@ app.get('/', (req, res) => {
                                 <input type="number" step="0.1" id="smartOffsetNetProfit" placeholder="e.g. 1.00 (0 = Disabled)">
                             </div>
                             <div style="margin-top: 12px;">
-                                <label style="margin-top:0;">Required Nth Bottom Row for Peak Harvest (V1)</label>
-                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">The dynamic peak profit is only harvested if the accumulation at this specific row from the bottom is > 0. (Default is 5).</p>
+                                <label style="margin-top:0;">Nth Bottom Row Reference (V1)</label>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Defines the row from the bottom used to calculate the Nth Bottom Row Stop Loss below. (Default is 5).</p>
                                 <input type="number" step="1" id="smartOffsetBottomRowV1" placeholder="e.g. 5">
                             </div>
 
@@ -1648,9 +1645,6 @@ app.get('/', (req, res) => {
                             }
                         }
 
-                        // Condition is now based on the Nth bottom row
-                        const isNthBottomPositive = nthBottomAccumulation > 0;
-
                         let topStatusMessage = '';
                         let executingPeak = false;
                         let executingSl = false;
@@ -1660,12 +1654,8 @@ app.get('/', (req, res) => {
                         const isHitFullSl = (stopLossV1 < 0 && runningAccumulation <= stopLossV1);
 
                         if (targetV1 > 0 && peakAccumulation >= targetV1 && peakRowIndex >= 0) {
-                            if (isNthBottomPositive) {
-                                topStatusMessage = \`<span style="color:#1e8e3e; font-weight:bold;">🔥 Target Reached & Row \${bottomRowN} from bottom > 0! Slicing at Row \${peakRowIndex + 1} to harvest Peak Profit ($\${peakAccumulation.toFixed(4)})!</span>\`;
-                                executingPeak = true;
-                            } else {
-                                topStatusMessage = \`TP Status: <span style="color:#d93025; font-weight:bold;">⏸️ Peak found (+\$\${peakAccumulation.toFixed(4)}) but Row \${bottomRowN} from bottom is <= 0</span>\`;
-                            }
+                            topStatusMessage = \`<span style="color:#1e8e3e; font-weight:bold;">🔥 Target Reached! Slicing at Row \${peakRowIndex + 1} to harvest Peak Profit ($\${peakAccumulation.toFixed(4)})!</span>\`;
+                            executingPeak = true;
                         } else if (isHitNthSl || isHitFullSl) {
                             
                             // Check if blocked by rate limit
@@ -1689,7 +1679,7 @@ app.get('/', (req, res) => {
 
                         } else {
                             let pColor = peakAccumulation > 0 ? '#1e8e3e' : '#5f6368';
-                            topStatusMessage = \`TP Status: <span style="color:#1a73e8; font-weight:bold;">🔎 Seeking Peak &ge; $\${targetV1.toFixed(4)} (Requires Row \${bottomRowN} from bottom > 0)</span> | Current Peak: <strong style="color:\${pColor}">+\$\${peakAccumulation.toFixed(4)}</strong>\`;
+                            topStatusMessage = \`TP Status: <span style="color:#1a73e8; font-weight:bold;">🔎 Seeking Peak &ge; $\${targetV1.toFixed(4)}</span> | Current Peak: <strong style="color:\${pColor}">+\$\${peakAccumulation.toFixed(4)}</strong>\`;
                         }
 
                         let displayAccumulation = 0;
