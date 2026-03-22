@@ -107,11 +107,13 @@ global.activeBots = global.activeBots || new Map();
 global.globalPnlPeaks = global.globalPnlPeaks || new Map(); 
 global.lastStopLossExecutions = global.lastStopLossExecutions || new Map(); 
 global.rollingStopLosses = global.rollingStopLosses || new Map(); 
+global.autoDynamicExecutions = global.autoDynamicExecutions || new Map(); // Tracker for UI Dashboard
 
 const activeBots = global.activeBots;
 const globalPnlPeaks = global.globalPnlPeaks;
 const lastStopLossExecutions = global.lastStopLossExecutions;
 const rollingStopLosses = global.rollingStopLosses;
+const autoDynamicExecutions = global.autoDynamicExecutions;
 
 function logForProfile(profileId, msg) {
     console.log(`[Profile: ${profileId}] ${msg}`);
@@ -375,8 +377,17 @@ const executeOneMinuteCloser = async () => {
                 const isNegativeMatch = (slMin < 0 && pos.pnl < 0 && pos.pnl >= slMin && pos.pnl <= slMax);
 
                 if (isPositiveMatch || isNegativeMatch) {
-                    const sideStr = isPositiveMatch ? "Take Profit" : "Stop Loss (2:1 Ratio Protected)";
-                    logForProfile(pos.profileId, `[${pos.symbol}] ⏳ 1-Min Range Closer: PNL $${pos.pnl.toFixed(4)} matches the ${sideStr} boundary. Closing position.`);
+                    const executionType = isPositiveMatch ? "Take Profit" : "Stop Loss";
+                    
+                    // Record to Global Tracker for Frontend UI display
+                    autoDynamicExecutions.set(dbUserId, {
+                        time: Date.now(),
+                        type: executionType,
+                        symbol: pos.symbol,
+                        pnl: pos.pnl
+                    });
+
+                    logForProfile(pos.profileId, `[${pos.symbol}] ⏳ 1-Min Range Closer: PNL $${pos.pnl.toFixed(4)} matches the ${executionType} boundary. Closing position.`);
                     
                     pos.cState.lockUntil = Date.now() + 10000;
                     const contractsToClose = pos.contracts;
@@ -825,7 +836,9 @@ app.get('/api/status', authMiddleware, async (req, res) => {
         rollingStopLosses.set(dbUserId, arr); 
     }
 
-    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss });
+    const autoDynExec = global.autoDynamicExecutions ? global.autoDynamicExecutions.get(dbUserId) : null;
+
+    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec });
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => {
@@ -958,6 +971,14 @@ app.get('/', (req, res) => {
                         <div><span class="stat-label">Winning / Total Coins Trading</span><span class="val" id="globalWinRate" style="color:#e65100;">0 / 0</span></div>
                         <div><span class="stat-label">Global Unrealized PNL ($)</span><span class="val" id="topGlobalUnrealized">0.0000000000</span></div>
                     </div>
+                </div>
+
+                <!-- 1-MIN AUTO-DYNAMIC STATUS TRACKER -->
+                <div id="autoDynStatusBox" style="display:none; background:#e8f0fe; border: 1px solid #cce0ff; padding: 16px; border-radius: 8px; margin-bottom: 24px;">
+                    <h3 style="margin-top:0; color:#1a73e8; border-bottom:1px solid #cce0ff; padding-bottom:8px; font-size:1.1em;">
+                        ⚡ 1-Min Auto-Dynamic Status (2:1 Ratio Tracker)
+                    </h3>
+                    <div id="autoDynLiveDetails"></div>
                 </div>
 
                 <div class="flex-container">
@@ -1556,6 +1577,7 @@ app.get('/', (req, res) => {
                 const tpMaxInput = document.getElementById('minuteCloseTpMaxPnl');
                 const slMinInput = document.getElementById('minuteCloseSlMinPnl');
                 const slMaxInput = document.getElementById('minuteCloseSlMaxPnl');
+                const autoDynStatusBox = document.getElementById('autoDynStatusBox');
 
                 if (autoDynCheckbox && autoDynCheckbox.checked) {
                     tpMinInput.disabled = true; tpMaxInput.disabled = true;
@@ -1564,22 +1586,61 @@ app.get('/', (req, res) => {
                     tpMinInput.style.backgroundColor = '#e8eaed'; tpMaxInput.style.backgroundColor = '#e8eaed';
                     slMinInput.style.backgroundColor = '#e8eaed'; slMaxInput.style.backgroundColor = '#e8eaed';
                     
+                    autoDynStatusBox.style.display = 'block';
+
+                    let tpMin = Math.min(dynamicMin, dynamicMax);
+                    let slMax = -(tpMin * 0.5); // ASYMMETRIC 50% mapping
+
                     if (hasDynamicBoundary) {
-                        tpMinInput.value = Math.min(dynamicMin, dynamicMax).toFixed(4);
+                        tpMinInput.value = tpMin.toFixed(4);
                         tpMaxInput.value = Math.max(dynamicMin, dynamicMax).toFixed(4);
-                        // SL ranges negative ASYMMETRIC mapping (50%)
-                        slMaxInput.value = (-(Math.min(dynamicMin, dynamicMax) * 0.5)).toFixed(4);
+                        slMaxInput.value = slMax.toFixed(4);
                         slMinInput.value = (-(Math.max(dynamicMin, dynamicMax) * 0.5)).toFixed(4);
                     } else {
                         tpMinInput.value = ''; tpMaxInput.value = '';
                         slMinInput.value = ''; slMaxInput.value = '';
                     }
+
+                    // Populate UI Tracker
+                    let adHtml = '';
+                    if (hasDynamicBoundary && activeCandidates.length > 0) {
+                        let highestCoin = activeCandidates.reduce((prev, current) => (prev.pnl > current.pnl) ? prev : current, activeCandidates[0]);
+                        let lowestCoin = activeCandidates.reduce((prev, current) => (prev.pnl < current.pnl) ? prev : current, activeCandidates[0]);
+
+                        let distToTp = tpMin - highestCoin.pnl;
+                        let distToSl = lowestCoin.pnl - slMax; 
+
+                        let tpDistText = distToTp > 0 ? \`$\${distToTp.toFixed(4)} away\` : \`<span style="color:#1e8e3e; font-weight:bold;">IN RANGE</span>\`;
+                        let slDistText = distToSl > 0 ? \`$\${distToSl.toFixed(4)} away\` : \`<span style="color:#d93025; font-weight:bold;">IN RANGE</span>\`;
+
+                        adHtml += \`<div class="flex-row" style="justify-content: space-between; margin-bottom: 12px;">\`;
+                        adHtml += \`<div><span class="stat-label">Closest to Take Profit (Target: $\${tpMin.toFixed(4)})</span><span class="val">\${highestCoin.symbol}: <span style="color:\${highestCoin.pnl >= 0 ? '#1e8e3e' : '#d93025'}">$\${highestCoin.pnl.toFixed(4)}</span> <span style="font-size:0.65em; font-weight:normal;">(\${tpDistText})</span></span></div>\`;
+                        adHtml += \`<div><span class="stat-label">Closest to Stop Loss (Limit: $\${slMax.toFixed(4)})</span><span class="val">\${lowestCoin.symbol}: <span style="color:\${lowestCoin.pnl >= 0 ? '#1e8e3e' : '#d93025'}">$\${lowestCoin.pnl.toFixed(4)}</span> <span style="font-size:0.65em; font-weight:normal;">(\${slDistText})</span></span></div>\`;
+                        adHtml += \`</div>\`;
+                    } else {
+                        adHtml += \`<p style="color:#5f6368; font-size:0.9em; margin-bottom:12px;">Calculating dynamic boundaries... (needs at least 2 active coins and a measurable peak)</p>\`;
+                    }
+
+                    if (data.autoDynExec) {
+                        const execDate = new Date(data.autoDynExec.time).toLocaleTimeString();
+                        const typeColor = data.autoDynExec.type === 'Take Profit' ? '#1e8e3e' : '#d93025';
+                        adHtml += \`<div style="border-top:1px dashed #b3d4ff; padding-top:12px; font-size:0.9em;">
+                            <strong>Last Execution:</strong> <span style="color:\${typeColor}; font-weight:bold;">\${data.autoDynExec.type}</span> on <strong>\${data.autoDynExec.symbol}</strong> at PNL <span style="color:\${typeColor};">$\${data.autoDynExec.pnl.toFixed(4)}</span> (\${execDate})
+                        </div>\`;
+                    } else {
+                        adHtml += \`<div style="border-top:1px dashed #b3d4ff; padding-top:12px; font-size:0.9em; color:#5f6368;"><strong>Last Execution:</strong> No actions executed yet in this session.</div>\`;
+                    }
+                    
+                    document.getElementById('autoDynLiveDetails').innerHTML = adHtml;
+
                 } else if (autoDynCheckbox) {
                     tpMinInput.disabled = false; tpMaxInput.disabled = false;
                     slMinInput.disabled = false; slMaxInput.disabled = false;
                     
                     tpMinInput.style.backgroundColor = '#fafafa'; tpMaxInput.style.backgroundColor = '#fafafa';
                     slMinInput.style.backgroundColor = '#fafafa'; slMaxInput.style.backgroundColor = '#fafafa';
+
+                    autoDynStatusBox.style.display = 'none';
                 }
 
                 // --- RENDER LIVE SMART OFFSET TRADES (V1 - GROUP ACCUMULATION) ---
