@@ -1,5 +1,3 @@
-//web8888
-
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -68,6 +66,7 @@ const SettingsSchema = new mongoose.Schema({
     smartOffsetNetProfit2: { type: Number, default: 0 }, 
     smartOffsetStopLoss2: { type: Number, default: 0 },   
     smartOffsetMaxLossPerMinute: { type: Number, default: 0 }, 
+    smartOffsetMaxLossTimeframeSeconds: { type: Number, default: 60 }, // NEW TIMEFRAME FIELD
     minuteCloseAutoDynamic: { type: Boolean, default: false },
     minuteCloseMinPnl: { type: Number, default: 0 },
     minuteCloseMaxPnl: { type: Number, default: 0 },
@@ -402,16 +401,20 @@ setInterval(async () => {
             const smartOffsetStopLoss = parseFloat(userSetting.smartOffsetStopLoss) || 0;
             const smartOffsetNetProfit2 = parseFloat(userSetting.smartOffsetNetProfit2) || 0;
             const smartOffsetStopLoss2 = parseFloat(userSetting.smartOffsetStopLoss2) || 0;
+            
+            // DYNAMIC TIMEFRAME VARIABLES
             const smartOffsetMaxLossPerMinute = parseFloat(userSetting.smartOffsetMaxLossPerMinute) || 0;
+            const smartOffsetMaxLossTimeframeSeconds = parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds) || 60;
+            const timeframeMs = smartOffsetMaxLossTimeframeSeconds * 1000;
             
             let globalUnrealized = 0;
             let activeCandidates = [];
             let firstProfileId = null; 
             let totalAllCoinsUser = 0;
 
-            // Rolling Loss Tracker logic
+            // Rolling Loss Tracker logic using customized timeframe
             let rollingLossArr = rollingStopLosses.get(dbUserId) || [];
-            rollingLossArr = rollingLossArr.filter(record => Date.now() - record.time < 60000);
+            rollingLossArr = rollingLossArr.filter(record => Date.now() - record.time < timeframeMs);
             rollingStopLosses.set(dbUserId, rollingLossArr);
             let currentMinuteLoss = rollingLossArr.reduce((sum, record) => sum + record.amount, 0);
 
@@ -504,7 +507,7 @@ setInterval(async () => {
                     if (smartOffsetMaxLossPerMinute > 0) {
                         if (currentMinuteLoss + Math.abs(runningAccumulation) <= smartOffsetMaxLossPerMinute) allowSl = true;
                     } else {
-                        if (Date.now() - (lastStopLossExecutions.get(dbUserId) || 0) >= 60000) allowSl = true;
+                        if (Date.now() - (lastStopLossExecutions.get(dbUserId) || 0) >= timeframeMs) allowSl = true;
                     }
 
                     if (allowSl) {
@@ -598,7 +601,7 @@ setInterval(async () => {
                                 reason = `STOP LOSS V2 (Target: $${stopLossV2.toFixed(4)})`;
                             }
                         } else {
-                            if (Date.now() - (lastStopLossExecutions.get(dbUserId) || 0) >= 60000) {
+                            if (Date.now() - (lastStopLossExecutions.get(dbUserId) || 0) >= timeframeMs) {
                                 triggerOffset = true;
                                 reason = `STOP LOSS V2 (Target: $${stopLossV2.toFixed(4)})`;
                                 lastStopLossExecutions.set(dbUserId, Date.now());
@@ -742,7 +745,7 @@ app.post('/api/register', async (req, res) => {
         const { username, password } = req.body;
         const hashedPassword = await bcrypt.hash(password, 10);
         const user = await User.create({ username, password: hashedPassword });
-        await Settings.create({ userId: user._id, subAccounts: [], globalTargetPnl: 0, globalTrailingPnl: 0, smartOffsetNetProfit: 0, smartOffsetBottomRowV1: 5, smartOffsetStopLoss: 0, smartOffsetNetProfit2: 0, smartOffsetStopLoss2: 0, smartOffsetMaxLossPerMinute: 0, minuteCloseAutoDynamic: false, minuteCloseMinPnl: 0, minuteCloseMaxPnl: 0 });
+        await Settings.create({ userId: user._id, subAccounts: [], globalTargetPnl: 0, globalTrailingPnl: 0, smartOffsetNetProfit: 0, smartOffsetBottomRowV1: 5, smartOffsetStopLoss: 0, smartOffsetNetProfit2: 0, smartOffsetStopLoss2: 0, smartOffsetMaxLossPerMinute: 0, smartOffsetMaxLossTimeframeSeconds: 60, minuteCloseAutoDynamic: false, minuteCloseMinPnl: 0, minuteCloseMaxPnl: 0 });
         res.json({ success: true, message: 'Registration successful!' });
     } catch (err) {
         res.status(400).json({ error: 'Username already exists or invalid data.' });
@@ -764,7 +767,7 @@ app.get('/api/settings', authMiddleware, async (req, res) => {
 });
 
 app.post('/api/settings', authMiddleware, async (req, res) => {
-    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, minuteCloseAutoDynamic, minuteCloseMinPnl, minuteCloseMaxPnl } = req.body;
+    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseMinPnl, minuteCloseMaxPnl } = req.body;
     
     const existingSettings = await Settings.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -801,6 +804,7 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             smartOffsetNetProfit2: parseFloat(smartOffsetNetProfit2) || 0,
             smartOffsetStopLoss2: parsedStopLoss2,
             smartOffsetMaxLossPerMinute: parseFloat(smartOffsetMaxLossPerMinute) || 0,
+            smartOffsetMaxLossTimeframeSeconds: parseInt(smartOffsetMaxLossTimeframeSeconds) || 60,
             minuteCloseAutoDynamic: minuteCloseAutoDynamic === true,
             minuteCloseMinPnl: parseFloat(minuteCloseMinPnl) || 0,
             minuteCloseMaxPnl: parseFloat(minuteCloseMaxPnl) || 0
@@ -836,11 +840,12 @@ app.get('/api/status', authMiddleware, async (req, res) => {
         if (botData.userId === req.userId.toString()) userStatuses[profileId] = botData.state;
     }
 
-    // Clean and return current 60s minute loss to UI
+    // Clean and return current dynamic timeframe loss to UI
     let currentMinuteLoss = 0;
     const dbUserId = req.userId.toString();
+    const timeframeSec = settings ? (settings.smartOffsetMaxLossTimeframeSeconds || 60) : 60;
     if (rollingStopLosses.has(dbUserId)) {
-        let arr = rollingStopLosses.get(dbUserId).filter(r => Date.now() - r.time < 60000);
+        let arr = rollingStopLosses.get(dbUserId).filter(r => Date.now() - r.time < (timeframeSec * 1000));
         currentMinuteLoss = arr.reduce((sum, r) => sum + r.amount, 0);
         rollingStopLosses.set(dbUserId, arr); 
     }
@@ -1013,11 +1018,22 @@ app.get('/', (req, res) => {
                                 <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Always evaluates! If the cumulative Group Net PNL drops to or below this negative amount, it closes the group.</p>
                                 <input type="number" step="0.1" id="smartOffsetStopLoss" placeholder="e.g. -2.00 (0 = Disabled)">
                             </div>
+
+                            <!-- NEW TIMEFRAME CONFIGURATION -->
                             <div style="margin-top: 12px; border-top: 1px solid #cce0ff; padding-top: 12px;">
-                                <label style="margin-top:0;">Max Stop Loss Amount Allowed Per Minute ($)</label>
-                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">If > 0, allows multiple stop losses per minute as long as the total combined loss is under this amount. If 0, limits exactly to 1 SL per minute regardless of amount. *(Must be large enough to cover the single largest SL execution)*.</p>
-                                <input type="number" step="0.1" id="smartOffsetMaxLossPerMinute" placeholder="e.g. 10.00 (0 = classic 1 per min rule)">
+                                <label style="margin-top:0;">Stop Loss Execution Limits</label>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Define how often Stop Losses can occur. If Amount Limit > 0, allows multiple SLs within the timeframe up to the amount. If 0, limits to exactly 1 SL per timeframe.</p>
+                                <div class="flex-row">
+                                    <div style="flex:1;">
+                                        <input type="number" step="0.1" id="smartOffsetMaxLossPerMinute" placeholder="Max Amount Allowed (e.g. 10.00)">
+                                    </div>
+                                    <div style="flex:1;">
+                                        <input type="number" step="1" id="smartOffsetMaxLossTimeframeSeconds" placeholder="Timeframe in Seconds (e.g. 60)">
+                                    </div>
+                                </div>
                             </div>
+                            <!-- END NEW TIMEFRAME CONFIGURATION -->
+
                             <div style="margin-top: 12px; border-top: 1px solid #cce0ff; padding-top: 12px;">
                                 <label style="margin-top:0; display:flex; align-items:center;">
                                     1-Minute Interval: Close Positions Between PNL ($)
@@ -1137,6 +1153,7 @@ app.get('/', (req, res) => {
             let mySmartOffsetNetProfit2 = 0;
             let mySmartOffsetStopLoss2 = 0;
             let mySmartOffsetMaxLossPerMinute = 0;
+            let mySmartOffsetMaxLossTimeframeSeconds = 60; // NEW TIMEFRAME VARIABLE
             let myMinuteCloseAutoDynamic = false;
             let myMinuteCloseMinPnl = 0;
             let myMinuteCloseMaxPnl = 0;
@@ -1213,6 +1230,7 @@ app.get('/', (req, res) => {
                 mySmartOffsetNetProfit2 = config.smartOffsetNetProfit2 || 0;
                 mySmartOffsetStopLoss2 = config.smartOffsetStopLoss2 || 0;
                 mySmartOffsetMaxLossPerMinute = config.smartOffsetMaxLossPerMinute || 0;
+                mySmartOffsetMaxLossTimeframeSeconds = config.smartOffsetMaxLossTimeframeSeconds !== undefined ? config.smartOffsetMaxLossTimeframeSeconds : 60;
                 myMinuteCloseAutoDynamic = config.minuteCloseAutoDynamic || false;
                 myMinuteCloseMinPnl = config.minuteCloseMinPnl || 0;
                 myMinuteCloseMaxPnl = config.minuteCloseMaxPnl || 0;
@@ -1225,6 +1243,7 @@ app.get('/', (req, res) => {
                 document.getElementById('smartOffsetNetProfit2').value = mySmartOffsetNetProfit2;
                 document.getElementById('smartOffsetStopLoss2').value = mySmartOffsetStopLoss2;
                 document.getElementById('smartOffsetMaxLossPerMinute').value = mySmartOffsetMaxLossPerMinute;
+                document.getElementById('smartOffsetMaxLossTimeframeSeconds').value = mySmartOffsetMaxLossTimeframeSeconds;
                 document.getElementById('minuteCloseAutoDynamic').checked = myMinuteCloseAutoDynamic;
                 document.getElementById('minuteCloseMinPnl').value = myMinuteCloseMinPnl;
                 document.getElementById('minuteCloseMaxPnl').value = myMinuteCloseMaxPnl;
@@ -1250,11 +1269,12 @@ app.get('/', (req, res) => {
                 mySmartOffsetNetProfit2 = parseFloat(document.getElementById('smartOffsetNetProfit2').value) || 0;
                 mySmartOffsetStopLoss2 = parseFloat(document.getElementById('smartOffsetStopLoss2').value) || 0;
                 mySmartOffsetMaxLossPerMinute = parseFloat(document.getElementById('smartOffsetMaxLossPerMinute').value) || 0;
+                mySmartOffsetMaxLossTimeframeSeconds = parseInt(document.getElementById('smartOffsetMaxLossTimeframeSeconds').value) || 60;
                 myMinuteCloseAutoDynamic = document.getElementById('minuteCloseAutoDynamic').checked;
                 myMinuteCloseMinPnl = parseFloat(document.getElementById('minuteCloseMinPnl').value) || 0;
                 myMinuteCloseMaxPnl = parseFloat(document.getElementById('minuteCloseMaxPnl').value) || 0;
                 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved Successfully!');
             }
@@ -1274,7 +1294,7 @@ app.get('/', (req, res) => {
                 
                 mySubAccounts.push({ name, apiKey: key, secret: secret, side: 'long', leverage: 10, baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });
                 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -1318,7 +1338,7 @@ app.get('/', (req, res) => {
                 const index = parseInt(select.value);
                 if(!isNaN(index) && index >= 0) {
                     mySubAccounts.splice(index, 1);
-                    const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
+                    const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
                     const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                     const json = await res.json();
                     mySubAccounts = json.settings.subAccounts || [];
@@ -1400,7 +1420,7 @@ app.get('/', (req, res) => {
                 profile.maxContracts = parseInt(document.getElementById('maxContracts').value);
                 profile.coins = myCoins;
 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseMinPnl: myMinuteCloseMinPnl, minuteCloseMaxPnl: myMinuteCloseMaxPnl };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -1491,10 +1511,11 @@ app.get('/', (req, res) => {
                     }
                 }
 
+                const timeframeSec = globalSet.smartOffsetMaxLossTimeframeSeconds || 60;
                 const maxLossPerMin = globalSet.smartOffsetMaxLossPerMinute || 0;
                 const lossTrackerHtml = maxLossPerMin > 0 
-                    ? \`<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>60s Loss Tracker:</strong> $\${currentMinuteLoss.toFixed(2)} / $\${maxLossPerMin.toFixed(2)} Limit</div>\`
-                    : \`<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>60s Loss Tracker:</strong> Limited to 1 SL execution per minute</div>\`;
+                    ? \`<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>\${timeframeSec}s Loss Tracker:</strong> $\${currentMinuteLoss.toFixed(2)} / $\${maxLossPerMin.toFixed(2)} Limit</div>\`
+                    : \`<div style="margin-top: 6px; padding-top: 6px; border-top: 1px dashed #b3d4ff;">⏳ <strong>\${timeframeSec}s Loss Tracker:</strong> Limited to 1 SL execution per \${timeframeSec}s</div>\`;
                 
                 // ==========================================
                 // DYNAMIC 1-MINUTE CLOSER UI SYNC 
@@ -1712,7 +1733,7 @@ app.get('/', (req, res) => {
                             } else if (isStopHit) {
                                 if (maxLossPerMin > 0 && (currentMinuteLoss + Math.abs(net)) > maxLossPerMin) {
                                     statusIcon = '🛑 BLOCKED (Limit)';
-                                    topStatusMessage2 = \`<span style="color:#d93025; font-weight:bold;">🛑 Stop Loss reached but Blocked by 60s Limit!</span>\`;
+                                    topStatusMessage2 = \`<span style="color:#d93025; font-weight:bold;">🛑 Stop Loss reached but Blocked by \${timeframeSec}s Limit!</span>\`;
                                 } else {
                                     statusIcon = '🔥 Executing (SL)...';
                                     topStatusMessage2 = \`<span style="color:#d93025; font-weight:bold;">🔥 Stop Loss Hit & Executing!</span>\`;
