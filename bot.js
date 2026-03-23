@@ -1,3 +1,5 @@
+//web8888
+
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -639,10 +641,18 @@ app.get('/', (req, res) => {
             <!-- ========================== AI PILOT LIVE VIEW TAB ========================== -->
             <div id="aipilot-tab" style="display:none;">
                 <div class="panel ai-glow" style="border: 1px solid #1a73e8;">
-                    <div class="flex-row" style="justify-content: space-between;">
-                        <h2 style="color: #1a73e8; border: none; margin: 0;">🤖 AI Pilot Telemetry & Live Radar</h2>
+                    
+                    <!-- NEW TOP HEADER WITH INJECTED PEAK BADGE -->
+                    <div class="flex-row" style="justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+                        <div class="flex-row" style="align-items: center; flex-wrap: wrap;">
+                            <h2 style="color: #1a73e8; border: none; margin: 0;">🤖 AI Pilot Telemetry & Live Radar</h2>
+                            <div id="aiTopPeakBadge" style="margin-left: 10px; padding: 6px 12px; background: #e8f0fe; border-radius: 20px; color: #1a73e8; font-weight: bold; font-size: 0.9em; border: 1px solid #1a73e8;">
+                                🏆 Peak: +$0.0000 | 💧 Tension: 0%
+                            </div>
+                        </div>
                         <div id="aiMasterStatus" style="font-weight: bold; padding: 8px 16px; border-radius: 4px;">Loading...</div>
                     </div>
+                    
                     <p style="color: #5f6368; font-size: 0.9em;">Visualizing the AI's internal thought process, tracking the Positive Positions Peak, and dynamic trimming logic.</p>
 
                     <h3 style="color: #202124;">🏆 Positive Peak Radar (Dynamic Group Take-Profit & Absorption)</h3>
@@ -907,7 +917,7 @@ app.get('/', (req, res) => {
                         aiStatusEl.innerText = "STATUS: OFFLINE (Manual Mode) 🔴"; aiStatusEl.style.backgroundColor = "#fce8e6"; aiStatusEl.style.color = "#d93025";
                     }
 
-                    const aiLogs = (stateData.logs || []).filter(l => l.includes('🤖') || l.includes('AI') || l.includes('Trimmer') || l.includes('CLUSTER'));
+                    const aiLogs = (stateData.logs || []).filter(l => l.includes('🤖') || l.includes('AI') || l.includes('Trimmer') || l.includes('CLUSTER') || l.includes('Take-Profit'));
                     document.getElementById('aiSpecificLogs').innerHTML = aiLogs.length > 0 ? aiLogs.join('<br>') : "<i>No AI actions recorded yet...</i>";
 
                     // 🏆 1. RENDER WINNERS GROUP PEAK RADAR 🏆
@@ -928,10 +938,12 @@ app.get('/', (req, res) => {
 
                     let peakDrop = peakW - currentWinnersSum;
                     let groupTrailStatus = "Gathering data...";
+                    let pctToDrop = 0;
                     
                     if (peakW > 0) {
                         let peakTolerance = peakW > 10.0 ? peakW * 0.15 : Math.max(peakW * 0.25, 0.01);
-                        let pctToDrop = ((peakDrop / peakTolerance) * 100).toFixed(0);
+                        pctToDrop = ((Math.max(0, peakDrop) / peakTolerance) * 100).toFixed(0);
+                        if(pctToDrop > 100) pctToDrop = 100;
                         
                         let simNet = currentWinnersSum + totalLosersSum;
                         let clusterSimMsg = "";
@@ -953,10 +965,13 @@ app.get('/', (req, res) => {
                             }
                         }
 
-                        groupTrailStatus = '<span style="color:#1a73e8; font-weight:bold;">Tracking Positive Winners Peak ($' + peakW.toFixed(4) + '). Dynamic Drop Tension: ' + Math.max(0, Math.min(pctToDrop, 100)) + '%.</span> ' + clusterSimMsg;
+                        groupTrailStatus = '<span style="color:#1a73e8; font-weight:bold;">Tracking Positive Winners Peak ($' + peakW.toFixed(4) + '). Dynamic Drop Tension: ' + pctToDrop + '%.</span> ' + clusterSimMsg;
                     } else {
                         groupTrailStatus = '<span style="color:#5f6368;">Waiting for positions to reach profit to engage Dynamic Cluster Trailing.</span>';
                     }
+
+                    // 🚨 NEW TOP VISUAL BADGE PINNED NEXT TO THE TITLE
+                    document.getElementById('aiTopPeakBadge').innerHTML = '🏆 Peak: +$' + peakW.toFixed(4) + ' &nbsp;|&nbsp; 💧 Tension: ' + pctToDrop + '%';
 
                     document.getElementById('aiWinnersGroupRadar').innerHTML = 
                         '<div class="flex-row" style="justify-content: space-between; margin-bottom: 12px;">' +
