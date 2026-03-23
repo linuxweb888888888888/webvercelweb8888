@@ -1,5 +1,3 @@
-//web8888
-
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
@@ -89,9 +87,7 @@ const SettingsSchema = new mongoose.Schema({
     minuteCloseSlMaxPnl: { type: Number, default: 0 },
     subAccounts: [SubAccountSchema],
     
-    // =============================================
-    // DATABASE-STORED STATE TRACKERS (Survives Reboots)
-    // =============================================
+    // Database-Stored Global States (Survives Reboots)
     currentGlobalPeak: { type: Number, default: 0 },
     lastStopLossTime: { type: Number, default: 0 },
     lastNoPeakSlTime: { type: Number, default: 0 },
@@ -111,10 +107,19 @@ const OffsetRecordSchema = new mongoose.Schema({
 });
 const OffsetRecord = mongoose.models.OffsetRecord || mongoose.model('OffsetRecord', OffsetRecordSchema);
 
+// NEW: Persistent Live State Schema (Stores live PNL, DCA Timers, and Logs)
+const ProfileStateSchema = new mongoose.Schema({
+    profileId: { type: mongoose.Schema.Types.ObjectId, required: true, unique: true },
+    userId: { type: mongoose.Schema.Types.ObjectId, required: true },
+    logs: { type: [String], default: [] },
+    coinStates: { type: mongoose.Schema.Types.Mixed, default: {} },
+    lastUpdated: { type: Date, default: Date.now }
+});
+const ProfileState = mongoose.models.ProfileState || mongoose.model('ProfileState', ProfileStateSchema);
+
 // ==========================================
 // 3. MULTI-PROFILE BOT ENGINE STATE
 // ==========================================
-// We only keep functional instances (HTTP connections, Timers) in memory.
 global.activeBots = global.activeBots || new Map();
 const activeBots = global.activeBots;
 
@@ -141,7 +146,7 @@ function calculateDcaQty(side, P0, Pc, C0, leverage, targetRoiPct) {
     return Math.ceil(Cn); 
 }
 
-function startBot(userId, subAccount) {
+async function startBot(userId, subAccount) {
     const profileId = subAccount._id.toString();
     if (activeBots.has(profileId)) stopBot(profileId);
 
@@ -154,7 +159,17 @@ function startBot(userId, subAccount) {
         enableRateLimit: true 
     });
     
-    const state = { logs: [], coinStates: {} };
+    // Resume state exactly from Database (Logs, DCA cooldowns, last known PNLs)
+    let dbState = await ProfileState.findOne({ profileId });
+    if (!dbState) {
+        dbState = await ProfileState.create({ profileId, userId, logs: [], coinStates: {} });
+    }
+    
+    const state = { 
+        logs: dbState.logs || [], 
+        coinStates: dbState.coinStates || {} 
+    };
+    
     let isProcessing = false;
     let lastError = '';
 
@@ -250,7 +265,7 @@ function startBot(userId, subAccount) {
                     }
 
                     // DCA TRIGGER
-                    if (cState.currentRoi <= currentSettings.triggerRoiPct && (Date.now() - cState.lastDcaTime > 12000)) {
+                    if (cState.currentRoi <= currentSettings.triggerRoiPct && (Date.now() - (cState.lastDcaTime || 0) > 12000)) {
                         const reqQty = calculateDcaQty(activeSide, cState.avgEntry, cState.currentPrice, cState.contracts, currentSettings.leverage, currentSettings.dcaTargetRoiPct);
 
                         if (reqQty <= 0) {
@@ -272,6 +287,12 @@ function startBot(userId, subAccount) {
             } 
             lastError = '';
 
+            // SAVE CURRENT STATE TO DATABASE SO IT SURVIVES REBOOTS
+            await ProfileState.updateOne(
+                { profileId },
+                { $set: { logs: state.logs, coinStates: state.coinStates, lastUpdated: Date.now() } }
+            ).catch(()=>{});
+
         } catch (err) {
             if (err.message !== lastError) {
                 logForProfile(profileId, `❌ Global API Error (Retrying next cycle): ${err.message}`);
@@ -283,7 +304,7 @@ function startBot(userId, subAccount) {
     }, 6000);
 
     activeBots.set(profileId, { userId: String(userId), settings: subAccount, state, exchange, intervalId });
-    logForProfile(profileId, `🚀 Engine Started for: ${subAccount.name}`);
+    logForProfile(profileId, `🚀 Engine Started & Resumed from Database for: ${subAccount.name}`);
 }
 
 function stopBot(profileId) {
@@ -426,7 +447,7 @@ const executeGlobalProfitMonitor = async () => {
         
         for (let userSetting of usersSettings) {
             const dbUserId = String(userSetting.userId);
-            let dbUpdates = {}; // Accumulate database updates securely
+            let dbUpdates = {}; 
             
             const globalTargetPnl = parseFloat(userSetting.globalTargetPnl) || 0;
             const globalTrailingPnl = parseFloat(userSetting.globalTrailingPnl) || 0;
@@ -450,11 +471,10 @@ const executeGlobalProfitMonitor = async () => {
             let firstProfileId = null; 
 
             let rollingLossArr = userSetting.rollingStopLosses || [];
-            const originalRollingLen = rollingLossArr.length;
+            const originalLen = rollingLossArr.length;
             rollingLossArr = rollingLossArr.filter(record => Date.now() - record.time < timeframeMs);
-            if (rollingLossArr.length !== originalRollingLen) {
-                dbUpdates.rollingStopLosses = rollingLossArr;
-            }
+            if (rollingLossArr.length !== originalLen) dbUpdates.rollingStopLosses = rollingLossArr;
+            
             let currentMinuteLoss = rollingLossArr.reduce((sum, record) => sum + record.amount, 0);
 
             for (let [profileId, botData] of activeBots.entries()) {
@@ -521,7 +541,7 @@ const executeGlobalProfitMonitor = async () => {
                 let reason = '';
                 let finalPairsToClose = [];
                 let finalNetProfit = 0;
-                let isNoPeakSl = false; // Flag to identify our specialized Lowest PNL sl
+                let isNoPeakSl = false;
                 
                 const isFullGroupSl = (smartOffsetStopLoss < 0 && runningAccumulation <= smartOffsetStopLoss);
 
@@ -531,13 +551,12 @@ const executeGlobalProfitMonitor = async () => {
                     
                     for(let i = 0; i <= peakRowIndex; i++) {
                         const w = activeCandidates[i];
-                        if (Math.abs(w.unrealizedPnl) <= 0.0002) continue; // Skip closing dust pairs 
-                        finalPairsToClose.push(w); // ONLY PUSH WINNER
+                        if (Math.abs(w.unrealizedPnl) <= 0.0002) continue; 
+                        finalPairsToClose.push(w); 
                     }
                     
                     if (finalPairsToClose.length === 0) triggerOffset = false; 
                 } 
-                // Stop Losses (Full Group)
                 else if (isFullGroupSl) {
                     let allowSl = false;
                     let limitVal = smartOffsetStopLoss;
@@ -559,12 +578,9 @@ const executeGlobalProfitMonitor = async () => {
                             dbUpdates.lastStopLossTime = lastStopLossTime;
                         }
 
-                        for(let i = 0; i < totalPairs; i++) {
-                            finalPairsToClose.push(activeCandidates[i]); // ONLY PUSH WINNERS
-                        }
+                        for(let i = 0; i < totalPairs; i++) finalPairsToClose.push(activeCandidates[i]);
                     }
                 }
-                // Stop Loss (NO PEAK FOUND <= 0.0000 -> Lowest PNL Coin)
                 else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
                     let allowNoPeakSl = false;
                     if (Date.now() - lastNoPeakSlTime >= 60000) allowNoPeakSl = true;
@@ -574,7 +590,6 @@ const executeGlobalProfitMonitor = async () => {
                         isNoPeakSl = true;
                         reason = "NO PEAK (Closing Lowest PNL every 1 min)";
                         
-                        // Absolute worst coin is the last element
                         const absoluteWorstCoin = activeCandidates[activeCandidates.length - 1];
                         finalNetProfit = absoluteWorstCoin.unrealizedPnl;
                         finalPairsToClose.push(absoluteWorstCoin);
@@ -585,7 +600,6 @@ const executeGlobalProfitMonitor = async () => {
                 }
 
                 if (triggerOffset) {
-                    // DOUBLE CHECK 2: Live check.
                     if (!isFullGroupSl && !isNoPeakSl) {
                         let actualPairsToClose = [];
                         let liveCheckNet = 0;
@@ -595,10 +609,7 @@ const executeGlobalProfitMonitor = async () => {
                             const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
                             const livePnl = bState ? (parseFloat(bState.unrealizedPnl) || 0) : pos.unrealizedPnl;
                             
-                            if (livePnl < pos.unrealizedPnl - 0.00001) {
-                                logForProfile(firstProfileId, `⚠️ SMART OFFSET V1 Skipped Position [${pos.symbol}]: Live PNL ($${livePnl.toFixed(4)}) dropped below snapshotted ($${pos.unrealizedPnl.toFixed(4)}).`);
-                                continue; 
-                            }
+                            if (livePnl < pos.unrealizedPnl - 0.00001) continue; 
 
                             actualPairsToClose.push(pos);
                             liveCheckNet += livePnl;
@@ -609,14 +620,12 @@ const executeGlobalProfitMonitor = async () => {
 
                         if (finalPairsToClose.length === 0) triggerOffset = false;
                     } else if (isNoPeakSl) {
-                        // Soft Check for Lowest PNL
                         let actualPairsToClose = [];
                         let liveCheckNet = 0;
                         for (let k = 0; k < finalPairsToClose.length; k++) {
                             const pos = finalPairsToClose[k];
                             const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
                             const livePnl = bState ? (parseFloat(bState.unrealizedPnl) || 0) : pos.unrealizedPnl;
-                            
                             actualPairsToClose.push(pos);
                             liveCheckNet += livePnl;
                         }
@@ -636,7 +645,6 @@ const executeGlobalProfitMonitor = async () => {
                             const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
                             
                             if (bState) { bState.lockUntil = Date.now() + 10000; bState.contracts = 0; }
-                            
                             if (pos.unrealizedPnl >= 0) totalWinnerPnl += pos.unrealizedPnl;
 
                             try {
@@ -666,7 +674,7 @@ const executeGlobalProfitMonitor = async () => {
                 }
             }
 
-            // SMART OFFSET V2 (TAKE PROFIT AND STOP LOSS)
+            // SMART OFFSET V2
             if (!offsetExecuted && (smartOffsetNetProfit2 > 0 || smartOffsetStopLoss2 < 0) && activeCandidates.length >= 2) {
                 let offsetExecuted2 = false;
                 const totalCoins = activeCandidates.length;
@@ -786,7 +794,7 @@ const executeGlobalProfitMonitor = async () => {
                 }
             }
             
-            // Push all DB updates to survive reboots!
+            // Push DB State Tracking (Survives Reboot)
             if (Object.keys(dbUpdates).length > 0) {
                 await Settings.updateOne({ userId: dbUserId }, { $set: dbUpdates }).catch(console.error);
             }
@@ -951,12 +959,30 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     res.json({ success: true, settings: updated });
 });
 
+// UPGRADED STATUS ROUTE: Automatically integrates Database State for seamless Reboots!
 app.get('/api/status', authMiddleware, async (req, res) => {
     bootstrapBots(); // Keep-alive trigger
+    
     const settings = await Settings.findOne({ userId: req.userId });
     const userStatuses = {};
+
+    // Load Live Active memory
     for (let [profileId, botData] of activeBots.entries()) {
-        if (botData.userId === req.userId.toString()) userStatuses[profileId] = botData.state;
+        if (botData.userId === req.userId.toString()) {
+            userStatuses[profileId] = botData.state;
+        }
+    }
+
+    // Load DB Saved State (If memory is empty due to a sudden reboot, the DB fills it in instantly)
+    if (settings && settings.subAccounts) {
+        const subIds = settings.subAccounts.map(s => s._id.toString());
+        const dbStates = await ProfileState.find({ profileId: { $in: subIds } });
+        
+        dbStates.forEach(dbS => {
+            if (!userStatuses[dbS.profileId]) {
+                userStatuses[dbS.profileId] = { logs: dbS.logs, coinStates: dbS.coinStates };
+            }
+        });
     }
 
     let currentMinuteLoss = 0;
