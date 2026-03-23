@@ -301,7 +301,7 @@ function stopBot(profileId) {
 // 4. BACKGROUND TASKS
 // =========================================================================
 
-// NEW: 1-Minute Live Wallet Tracker & Loss Calculator
+// NEW: 1-Minute Live Wallet Tracker & Loss Calculator (STABLE BALANCE)
 const executeWalletTracker = async () => {
     try {
         await connectDB();
@@ -312,13 +312,31 @@ const executeWalletTracker = async () => {
             let totalGlobalWalletBalance = 0;
             let fetchedAny = false;
 
-            // Gather balances across all active subAccounts for this user
+            // Gather stable balances across all active subAccounts for this user
             for (let [profileId, botData] of activeBots.entries()) {
                 if (botData.userId !== dbUserId) continue;
                 try {
                     const balanceData = await botData.exchange.fetchBalance();
-                    const usdtBalance = balanceData.USDT ? balanceData.USDT.total : 0;
-                    totalGlobalWalletBalance += usdtBalance;
+                    
+                    // CCXT standard: free (available) + used (locked in positions) = Stable Wallet Balance (No unrealized PNL)
+                    let stableBalance = 0;
+                    if (balanceData.USDT) {
+                        const free = balanceData.USDT.free || 0;
+                        const used = balanceData.USDT.used || 0;
+                        stableBalance = free + used;
+                    }
+
+                    // HTX specific raw info check (guarantees we get the exact stable balance)
+                    if (balanceData.info && balanceData.info.data) {
+                        const htxData = Array.isArray(balanceData.info.data) 
+                            ? balanceData.info.data.find(d => d.margin_asset === 'USDT') 
+                            : null;
+                        if (htxData && htxData.cross_margin_balance !== undefined) {
+                            stableBalance = parseFloat(htxData.cross_margin_balance);
+                        }
+                    }
+
+                    totalGlobalWalletBalance += stableBalance;
                     fetchedAny = true;
                 } catch (err) {
                     // Ignore transient network errors to avoid spam
@@ -1101,7 +1119,7 @@ app.get('/', (req, res) => {
                 <!-- GLOBAL STATS BANNER -->
                 <div class="status-box" style="background:#fff3e0; border-color:#ffe0b2; margin-bottom: 24px;">
                     <div class="flex-row" style="justify-content: space-between;">
-                        <div><span class="stat-label">Total Wallet Equity (USDT)</span><span class="val" id="topGlobalWallet" style="color:#202124;">$0.0000</span></div>
+                        <div><span class="stat-label">Total Stable Wallet Balance (USDT)</span><span class="val" id="topGlobalWallet" style="color:#202124;">$0.0000</span></div>
                         <div><span class="stat-label">Wallet Loss / Active Recovery Target</span><span class="val" id="topWalletRecovery" style="color:#f29900;">Disabled / Target Base</span></div>
                         <div><span class="stat-label">Winning / Total Coins Trading</span><span class="val" id="globalWinRate" style="color:#e65100;">0 / 0</span></div>
                         <div><span class="stat-label">Global Unrealized PNL ($)</span><span class="val" id="topGlobalUnrealized">0.0000000000</span></div>
@@ -1129,7 +1147,7 @@ app.get('/', (req, res) => {
                                     Live Wallet Peak Recovery
                                     <input type="checkbox" id="walletRecoveryEnabled" style="width:auto; margin-left:12px; margin-right:4px;"> Enable
                                 </h4>
-                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Tracks your live USDT wallet balance over a rolling window. If it drops from the peak, it overrides the Smart Offset V1 Target below with [Loss * Multiplier] to dynamically win back exactly what you lost.</p>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Tracks your Realized Stable Wallet Balance over a rolling window. If it drops from the peak (meaning a Stop Loss occurred), it overrides the Smart Offset V1 Target below with [Loss * Multiplier] to dynamically win back exactly what you lost using the V1 Group Accumulation Peak.</p>
                                 <div class="flex-row">
                                     <div style="flex:1;">
                                         <label style="margin-top:0;">Loss Recovery Multiplier</label>
