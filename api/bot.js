@@ -486,6 +486,7 @@ const executeGlobalProfitMonitor = async () => {
             const targetV2 = smartOffsetNetProfit2 > 0 ? smartOffsetNetProfit2 : 0;
 
             let offsetExecuted = false;
+            let v2SlEnabled = true;
 
             // SMART OFFSET V1
             if ((smartOffsetNetProfit > 0 || smartOffsetBottomRowV1StopLoss < 0 || smartOffsetStopLoss < 0) && activeCandidates.length >= 2) {
@@ -515,6 +516,10 @@ const executeGlobalProfitMonitor = async () => {
                     if (i === targetRefIndex) nthBottomAccumulation = runningAccumulation;
                 }
 
+                if (stopLossNth < 0) {
+                    v2SlEnabled = (nthBottomAccumulation <= stopLossNth);
+                }
+
                 let triggerOffset = false;
                 let reason = '';
                 let finalPairsToClose = [];
@@ -531,10 +536,10 @@ const executeGlobalProfitMonitor = async () => {
                         finalPairsToClose.push(activeCandidates[totalCoins - totalPairs + i]);
                     }
                 } 
-                // Stop Losses (Nth Row OR Full Group)
-                else if ((stopLossNth < 0 && nthBottomAccumulation <= stopLossNth) || isFullGroupSl) {
+                // Stop Losses (Full Group)
+                else if (isFullGroupSl) {
                     let allowSl = false;
-                    let limitVal = isFullGroupSl ? smartOffsetStopLoss : stopLossNth;
+                    let limitVal = smartOffsetStopLoss;
                     let projectedLoss = runningAccumulation; // Always uses full accumulation for max loss calculations
 
                     if (smartOffsetMaxLossPerMinute > 0) {
@@ -545,9 +550,7 @@ const executeGlobalProfitMonitor = async () => {
 
                     if (allowSl) {
                         triggerOffset = true;
-                        reason = isFullGroupSl 
-                            ? `STOP LOSS (Full Group hit limit: $${limitVal.toFixed(4)})` 
-                            : `STOP LOSS (Nth Row [${smartOffsetBottomRowV1}] hit limit: $${limitVal.toFixed(4)})`;
+                        reason = `STOP LOSS (Full Group hit limit: $${limitVal.toFixed(4)})`;
                         finalNetProfit = runningAccumulation; 
                         
                         if(smartOffsetMaxLossPerMinute <= 0) lastStopLossExecutions.set(dbUserId, Date.now());
@@ -614,7 +617,7 @@ const executeGlobalProfitMonitor = async () => {
 
                     if (smartOffsetNetProfit2 > 0 && netResult >= targetV2) {
                         triggerOffset = true; reason = `TAKE PROFIT V2 (Target: $${targetV2.toFixed(4)})`;
-                    } else if (smartOffsetStopLoss2 < 0 && netResult <= smartOffsetStopLoss2) {
+                    } else if (v2SlEnabled && smartOffsetStopLoss2 < 0 && netResult <= smartOffsetStopLoss2) {
                         triggerOffset = true; reason = `STOP LOSS V2 (Limit: $${smartOffsetStopLoss2.toFixed(4)})`;
                     }
                     
@@ -1037,7 +1040,7 @@ app.get('/', (req, res) => {
 
                             <div style="margin-top: 12px;">
                                 <label style="margin-top:0;">Nth Bottom Row Stop Loss (V1) ($)</label>
-                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">If the accumulation at the Nth Bottom Row specified above drops to or below this negative amount, it closes the entire group.</p>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">If the accumulation at the Nth Bottom Row specified above drops to or below this negative amount, it enables the Manual Offset Stop Loss V2. If above, it disables it.</p>
                                 <input type="number" step="0.1" id="smartOffsetBottomRowV1StopLoss" placeholder="e.g. -1.50 (0 = Disabled)">
                             </div>
 
@@ -1800,6 +1803,21 @@ app.get('/', (req, res) => {
 
                     const targetV2 = globalSet.smartOffsetNetProfit2 || 0;
                     const limitV2 = globalSet.smartOffsetStopLoss2 || 0;
+                    const stopLossNth = globalSet.smartOffsetBottomRowV1StopLoss || 0;
+                    const bottomRowN = globalSet.smartOffsetBottomRowV1 !== undefined ? globalSet.smartOffsetBottomRowV1 : 5;
+                    const targetRefIndex = Math.max(0, totalPairs - bottomRowN);
+
+                    let nthBottomAccumulation = 0;
+                    let tempAcc = 0;
+                    for (let i = 0; i < totalPairs; i++) {
+                        tempAcc += activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl;
+                        if (i === targetRefIndex) nthBottomAccumulation = tempAcc;
+                    }
+
+                    let v2SlEnabled = true;
+                    if (stopLossNth < 0) {
+                        v2SlEnabled = (nthBottomAccumulation <= stopLossNth);
+                    }
 
                     if (totalPairs === 0) {
                         document.getElementById('liveOffsetsContainer2').innerHTML = '<p style="color:#5f6368;">Not enough active trades to form pairs.</p>';
@@ -1822,7 +1840,7 @@ app.get('/', (req, res) => {
                             const nColor = net >= 0 ? '#1e8e3e' : '#d93025';
                             
                             const isTargetHit = (targetV2 > 0 && net >= targetV2);
-                            const isSlHit = (limitV2 < 0 && net <= limitV2);
+                            const isSlHit = (v2SlEnabled && limitV2 < 0 && net <= limitV2);
                             
                             let statusIcon = '⏳ Evaluating';
                             if (isTargetHit) {
@@ -1831,6 +1849,8 @@ app.get('/', (req, res) => {
                             } else if (isSlHit) {
                                 statusIcon = '🛑 Executing (SL)...';
                                 topStatusMessage2 = \`<span style="color:#d93025; font-weight:bold;">🛑 Executing Pair \${winnerIndex+1} & \${loserIndex+1} for SL!</span>\`;
+                            } else if (!v2SlEnabled && limitV2 < 0 && net <= limitV2) {
+                                statusIcon = '⏸️ SL Gated (Disabled)';
                             }
 
                             liveHtml += \`<tr>
@@ -1851,10 +1871,20 @@ app.get('/', (req, res) => {
                             liveHtml += \`<p style="font-size:0.85em; color:#5f6368; margin-top:12px;">Middle coin (Rank \${midIndex + 1}, Unpaired): <strong>\${mid.symbol}</strong> (<span style="color:\${mColor}">\${mid.pnl >= 0 ? '+' : ''}$\${mid.pnl.toFixed(4)}</span>)</p>\`;
                         }
                         
+                        let slGateStatus = '';
+                        if (stopLossNth < 0) {
+                            slGateStatus = v2SlEnabled 
+                                ? \`<span style="color:#d93025; font-weight:bold;">ENABLED</span> (V1 Nth Row Accum is \${nthBottomAccumulation.toFixed(4)})\` 
+                                : \`<span style="color:#f29900; font-weight:bold;">DISABLED / GATED</span> (V1 Nth Row Accum is \${nthBottomAccumulation.toFixed(4)} > Limit)\`;
+                        } else {
+                            slGateStatus = \`<span style="color:#1e8e3e; font-weight:bold;">ALWAYS ENABLED</span> (No V1 Gate Set)\`;
+                        }
+
                         let dynamicInfoHtml2 = \`<div style="margin-bottom: 12px; padding: 12px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 6px; color: #1a73e8; font-weight: 500;">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                                 <div>🎯 Strict Take Profit V2: $\${targetV2.toFixed(4)}</div>
                                 <div>🛑 Strict Stop Loss V2: $\${limitV2.toFixed(4)}</div>
+                                <div style="font-size: 0.9em;">🛡️ V2 SL Gate Status: \${slGateStatus}</div>
                             </div>
                             \${lossTrackerHtml}
                             <div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #b3d4ff; font-size: 1.1em;">
