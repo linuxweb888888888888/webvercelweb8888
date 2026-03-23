@@ -226,7 +226,7 @@ function startBot(userId, subAccount) {
                     cState.margin = margin;
                     cState.currentRoi = margin > 0 ? (unrealizedPnl / margin) * 100 : 0;
 
-                    // TP OR SL (Re-enabled Standard Single-Coin SL)
+                    // TP OR SL
                     const isTakeProfit = cState.currentRoi >= currentSettings.takeProfitPct;
                     const isStopLoss = currentSettings.stopLossPct < 0 && cState.currentRoi <= currentSettings.stopLossPct;
 
@@ -331,7 +331,6 @@ const executeOneMinuteCloser = async () => {
 
             if (totalPairs === 0) continue;
 
-            // 1. AUTO-DYNAMIC GROUP PEAK LOGIC
             if (autoDynamic) {
                 let runningAccumulation = 0;
                 let peakAccumulation = 0;
@@ -345,11 +344,8 @@ const executeOneMinuteCloser = async () => {
                 }
 
                 if (peakAccumulation > 0) {
-                    // TP Range captures the Group Peak exactly
                     rawTpMin = peakAccumulation * 0.8;
                     rawTpMax = peakAccumulation * 1.2;
-                    
-                    // SL Range strictly enforces the 2:1 ASYMMETRIC RATIO based on the group peak
                     rawSlMin = -(peakAccumulation * 5.0); 
                     rawSlMax = -(peakAccumulation * 0.5); 
                 } else {
@@ -368,7 +364,6 @@ const executeOneMinuteCloser = async () => {
 
             if (tpMax === 0 && slMax === 0) continue; 
 
-            // 2. EVALUATE GROUP ACCUMULATION AGAINST RANGES
             let runningAccumulation = 0;
             let executedGroup = false;
 
@@ -392,7 +387,6 @@ const executeOneMinuteCloser = async () => {
 
                     logForProfile(activeCandidates[0].profileId, `⏳ 1-Min Group Closer: Group Accumulation $${runningAccumulation.toFixed(4)} matches the ${executionType} boundary. Closing ${(i + 1) * 2} coins.`);
 
-                    // Close all coins inside this exact accumulation group
                     for (let k = 0; k <= i; k++) {
                         const cw = activeCandidates[k];
                         const cl = activeCandidates[totalCoins - totalPairs + k];
@@ -443,9 +437,9 @@ const executeGlobalProfitMonitor = async () => {
             const smartOffsetNetProfit = parseFloat(userSetting.smartOffsetNetProfit) || 0;
             const smartOffsetBottomRowV1 = parseInt(userSetting.smartOffsetBottomRowV1) || 5;
             const smartOffsetBottomRowV1StopLoss = parseFloat(userSetting.smartOffsetBottomRowV1StopLoss) || 0; 
-            const smartOffsetStopLoss = parseFloat(userSetting.smartOffsetStopLoss) || 0; // Re-enabled Full Group SL
+            const smartOffsetStopLoss = parseFloat(userSetting.smartOffsetStopLoss) || 0; 
             const smartOffsetNetProfit2 = parseFloat(userSetting.smartOffsetNetProfit2) || 0;
-            const smartOffsetStopLoss2 = parseFloat(userSetting.smartOffsetStopLoss2) || 0; // Re-enabled V2 SL
+            const smartOffsetStopLoss2 = parseFloat(userSetting.smartOffsetStopLoss2) || 0; 
             
             const smartOffsetMaxLossPerMinute = parseFloat(userSetting.smartOffsetMaxLossPerMinute) || 0;
             const smartOffsetMaxLossTimeframeSeconds = parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds) || 60;
@@ -530,24 +524,22 @@ const executeGlobalProfitMonitor = async () => {
                 if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation > 0 && peakRowIndex >= 0) {
                     triggerOffset = true;
                     reason = `TAKE PROFIT (Harvested Peak at Row ${peakRowIndex + 1}, Target: $${targetV1.toFixed(4)})`;
-                    finalNetProfit = 0; // Recalculate based on what actually gets closed
                     
                     for(let i = 0; i <= peakRowIndex; i++) {
                         const w = activeCandidates[i];
                         const l = activeCandidates[totalCoins - totalPairs + i];
                         
-                        // ONLY IF PEAK HIT: Skip closing pairs if both winner and loser PNL has magnitude 0.0002 or less
+                        // DOUBLE CHECK 1: Skip closing dust pairs (Do NOT abort group, just skip)
                         if (Math.abs(w.unrealizedPnl) <= 0.0002 && Math.abs(l.unrealizedPnl) <= 0.0002) {
                             continue;
                         }
 
                         finalPairsToClose.push(w);
                         finalPairsToClose.push(l);
-                        finalNetProfit += (w.unrealizedPnl + l.unrealizedPnl);
                     }
                     
                     if (finalPairsToClose.length === 0) {
-                        triggerOffset = false; // Abort if all pairs within the peak were skipped
+                        triggerOffset = false; 
                     }
                 } 
                 // Stop Losses (Full Group)
@@ -577,36 +569,69 @@ const executeGlobalProfitMonitor = async () => {
                 }
 
                 if (triggerOffset) {
-                    logForProfile(firstProfileId, `⚖️ SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} coins total. NET PROFIT: ${finalNetProfit >= 0 ? '+' : ''}$${finalNetProfit.toFixed(4)}`);
-                    
-                    let totalWinnerPnl = 0;
-                    let totalLoserPnl = 0;
 
-                    for (let k = 0; k < finalPairsToClose.length; k++) {
-                        const pos = finalPairsToClose[k];
-                        const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
-                        
-                        if (bState) { bState.lockUntil = Date.now() + 10000; bState.contracts = 0; }
-                        if (k % 2 === 0) totalWinnerPnl += pos.unrealizedPnl;
-                        else totalLoserPnl += pos.unrealizedPnl;
+                    // DOUBLE CHECK 2: Live check. If position trade got less, do NOT abort group closure, only abort that specific trade position
+                    if (!isFullGroupSl) {
+                        let actualPairsToClose = [];
+                        let liveCheckNet = 0;
 
-                        try {
-                            const orderSide = pos.side === 'long' ? 'sell' : 'buy';
-                            await pos.exchange.createOrder(pos.symbol, 'market', orderSide, pos.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: pos.leverage }).catch(()=>{});
-                            pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                            await Settings.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
-                        } catch (e) {}
+                        for (let k = 0; k < finalPairsToClose.length; k++) {
+                            const pos = finalPairsToClose[k];
+                            const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
+                            const livePnl = bState ? (parseFloat(bState.unrealizedPnl) || 0) : pos.unrealizedPnl;
+                            
+                            // If live PNL is worse than the snapshot (buffer 0.00001 for floats), abort this single position.
+                            if (livePnl < pos.unrealizedPnl - 0.00001) {
+                                logForProfile(firstProfileId, `⚠️ SMART OFFSET V1 Skipped Position [${pos.symbol}]: Live PNL ($${livePnl.toFixed(4)}) dropped below snapshotted ($${pos.unrealizedPnl.toFixed(4)}).`);
+                                continue; 
+                            }
+
+                            actualPairsToClose.push(pos);
+                            liveCheckNet += livePnl;
+                        }
+
+                        finalPairsToClose = actualPairsToClose;
+                        finalNetProfit = liveCheckNet;
+
+                        if (finalPairsToClose.length === 0) {
+                            triggerOffset = false;
+                        }
                     }
 
-                    OffsetRecord.create({
-                        userId: dbUserId, winnerSymbol: `Peak of ${finalPairsToClose.length/2} Winners`, winnerPnl: totalWinnerPnl,
-                        loserSymbol: `Peak of ${finalPairsToClose.length/2} Losers`, loserPnl: totalLoserPnl, netProfit: finalNetProfit
-                    }).catch(()=>{});
+                    if (triggerOffset) {
+                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V1 [${reason}]: Closing ${finalPairsToClose.length} coins total. NET PROFIT: ${finalNetProfit >= 0 ? '+' : ''}$${finalNetProfit.toFixed(4)}`);
+                        
+                        let totalWinnerPnl = 0;
+                        let totalLoserPnl = 0;
 
-                    offsetExecuted = true;
-                    if (finalNetProfit < 0 && smartOffsetMaxLossPerMinute > 0) {
-                        currentMinuteLoss += Math.abs(finalNetProfit);
-                        rollingLossArr.push({ time: Date.now(), amount: Math.abs(finalNetProfit) });
+                        for (let k = 0; k < finalPairsToClose.length; k++) {
+                            const pos = finalPairsToClose[k];
+                            const bState = activeBots.get(pos.profileId).state.coinStates[pos.symbol];
+                            
+                            if (bState) { bState.lockUntil = Date.now() + 10000; bState.contracts = 0; }
+                            
+                            // Estimate winner vs loser pool based on PNL positivity
+                            if (pos.unrealizedPnl >= 0) totalWinnerPnl += pos.unrealizedPnl;
+                            else totalLoserPnl += pos.unrealizedPnl;
+
+                            try {
+                                const orderSide = pos.side === 'long' ? 'sell' : 'buy';
+                                await pos.exchange.createOrder(pos.symbol, 'market', orderSide, pos.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: pos.leverage }).catch(()=>{});
+                                pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
+                                await Settings.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
+                            } catch (e) {}
+                        }
+
+                        OffsetRecord.create({
+                            userId: dbUserId, winnerSymbol: `Peak of ${finalPairsToClose.length} Mixed Coins`, winnerPnl: totalWinnerPnl,
+                            loserSymbol: `Skipped/Aborted Dropped Trades`, loserPnl: totalLoserPnl, netProfit: finalNetProfit
+                        }).catch(()=>{});
+
+                        offsetExecuted = true;
+                        if (finalNetProfit < 0 && smartOffsetMaxLossPerMinute > 0) {
+                            currentMinuteLoss += Math.abs(finalNetProfit);
+                            rollingLossArr.push({ time: Date.now(), amount: Math.abs(finalNetProfit) });
+                        }
                     }
                 }
             }
@@ -623,7 +648,7 @@ const executeGlobalProfitMonitor = async () => {
 
                     const biggestWinner = activeCandidates[winnerIndex];
                     const biggestLoser = activeCandidates[loserIndex];
-                    const netResult = biggestWinner.unrealizedPnl + biggestLoser.unrealizedPnl;
+                    let netResult = biggestWinner.unrealizedPnl + biggestLoser.unrealizedPnl;
                     
                     let triggerOffset = false;
                     let reason = '';
@@ -631,8 +656,6 @@ const executeGlobalProfitMonitor = async () => {
                     if (smartOffsetNetProfit2 > 0 && netResult >= targetV2) {
                         triggerOffset = true; reason = `TAKE PROFIT V2 (Target: $${targetV2.toFixed(4)})`;
                     } else if (v2SlEnabled && smartOffsetStopLoss2 < 0 && netResult <= smartOffsetStopLoss2) {
-                        
-                        // Check Stop Loss Execution Limits for V2
                         let allowSl = false;
                         if (smartOffsetMaxLossPerMinute > 0) {
                             if (currentMinuteLoss + Math.abs(netResult) <= smartOffsetMaxLossPerMinute) allowSl = true;
@@ -648,32 +671,58 @@ const executeGlobalProfitMonitor = async () => {
                     }
                     
                     if (triggerOffset) {
-                        logForProfile(firstProfileId, `⚖️ SMART OFFSET V2 [${reason}]: Paired Rank ${winnerIndex + 1} & ${loserIndex + 1} - Closing Winner [${biggestWinner.symbol}] & Loser [${biggestLoser.symbol}]. NET: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)}`);
-                        
-                        OffsetRecord.create({ userId: dbUserId, winnerSymbol: biggestWinner.symbol, winnerPnl: biggestWinner.unrealizedPnl, loserSymbol: biggestLoser.symbol, loserPnl: biggestLoser.unrealizedPnl, netProfit: netResult }).catch(()=>{});
+                        let closeW = true;
+                        let closeL = true;
 
-                        const bStateW = activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol];
-                        if(bStateW) { bStateW.lockUntil = Date.now() + 10000; bStateW.contracts = 0; }
-                        
-                        const bStateL = activeBots.get(biggestLoser.profileId).state.coinStates[biggestLoser.symbol];
-                        if(bStateL) { bStateL.lockUntil = Date.now() + 10000; bStateL.contracts = 0; }
+                        // Double check live state for V2 to abort individual positions that "got less"
+                        if (reason.includes("TAKE PROFIT V2")) {
+                            const bStateW = activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol];
+                            const bStateL = activeBots.get(biggestLoser.profileId).state.coinStates[biggestLoser.symbol];
+                            const liveW = bStateW ? (parseFloat(bStateW.unrealizedPnl)||0) : biggestWinner.unrealizedPnl;
+                            const liveL = bStateL ? (parseFloat(bStateL.unrealizedPnl)||0) : biggestLoser.unrealizedPnl;
+                            
+                            if (liveW < biggestWinner.unrealizedPnl - 0.00001) {
+                                logForProfile(firstProfileId, `⚠️ SMART OFFSET V2 Skipped Position [${biggestWinner.symbol}]: Live PNL ($${liveW.toFixed(4)}) dropped below snapshotted.`);
+                                closeW = false;
+                            }
+                            if (liveL < biggestLoser.unrealizedPnl - 0.00001) {
+                                logForProfile(firstProfileId, `⚠️ SMART OFFSET V2 Skipped Position [${biggestLoser.symbol}]: Live PNL ($${liveL.toFixed(4)}) dropped below snapshotted.`);
+                                closeL = false;
+                            }
+                            
+                            netResult = (closeW ? liveW : 0) + (closeL ? liveL : 0);
+                            if (!closeW && !closeL) triggerOffset = false;
+                        }
 
-                        const wOrderSide = biggestWinner.side === 'long' ? 'sell' : 'buy';
-                        await biggestWinner.exchange.createOrder(biggestWinner.symbol, 'market', wOrderSide, biggestWinner.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestWinner.leverage }).catch(()=>{});
-                        biggestWinner.subAccount.realizedPnl = (biggestWinner.subAccount.realizedPnl || 0) + biggestWinner.unrealizedPnl;
-                        await Settings.updateOne({ "subAccounts._id": biggestWinner.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestWinner.subAccount.realizedPnl } }).catch(()=>{});
+                        if (triggerOffset) {
+                            logForProfile(firstProfileId, `⚖️ SMART OFFSET V2 [${reason}]: Paired Rank ${winnerIndex + 1} & ${loserIndex + 1} - Executing Net: ${netResult >= 0 ? '+' : ''}$${netResult.toFixed(4)}`);
+                            
+                            OffsetRecord.create({ userId: dbUserId, winnerSymbol: closeW ? biggestWinner.symbol : 'Skipped', winnerPnl: closeW ? biggestWinner.unrealizedPnl : 0, loserSymbol: closeL ? biggestLoser.symbol : 'Skipped', loserPnl: closeL ? biggestLoser.unrealizedPnl : 0, netProfit: netResult }).catch(()=>{});
 
-                        const lOrderSide = biggestLoser.side === 'long' ? 'sell' : 'buy';
-                        await biggestLoser.exchange.createOrder(biggestLoser.symbol, 'market', lOrderSide, biggestLoser.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestLoser.leverage }).catch(()=>{});
-                        biggestLoser.subAccount.realizedPnl = (biggestLoser.subAccount.realizedPnl || 0) + biggestLoser.unrealizedPnl;
-                        await Settings.updateOne({ "subAccounts._id": biggestLoser.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestLoser.subAccount.realizedPnl } }).catch(()=>{});
-                        
-                        offsetExecuted2 = true;
+                            if (closeW) {
+                                const bStateW = activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol];
+                                if(bStateW) { bStateW.lockUntil = Date.now() + 10000; bStateW.contracts = 0; }
+                                const wOrderSide = biggestWinner.side === 'long' ? 'sell' : 'buy';
+                                await biggestWinner.exchange.createOrder(biggestWinner.symbol, 'market', wOrderSide, biggestWinner.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestWinner.leverage }).catch(()=>{});
+                                biggestWinner.subAccount.realizedPnl = (biggestWinner.subAccount.realizedPnl || 0) + biggestWinner.unrealizedPnl;
+                                await Settings.updateOne({ "subAccounts._id": biggestWinner.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestWinner.subAccount.realizedPnl } }).catch(()=>{});
+                            }
+                            
+                            if (closeL) {
+                                const bStateL = activeBots.get(biggestLoser.profileId).state.coinStates[biggestLoser.symbol];
+                                if(bStateL) { bStateL.lockUntil = Date.now() + 10000; bStateL.contracts = 0; }
+                                const lOrderSide = biggestLoser.side === 'long' ? 'sell' : 'buy';
+                                await biggestLoser.exchange.createOrder(biggestLoser.symbol, 'market', lOrderSide, biggestLoser.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestLoser.leverage }).catch(()=>{});
+                                biggestLoser.subAccount.realizedPnl = (biggestLoser.subAccount.realizedPnl || 0) + biggestLoser.unrealizedPnl;
+                                await Settings.updateOne({ "subAccounts._id": biggestLoser.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestLoser.subAccount.realizedPnl } }).catch(()=>{});
+                            }
 
-                        // Track the loss to prevent rapid repeated V2 SLs in the same minute
-                        if (reason.includes('STOP LOSS V2') && smartOffsetMaxLossPerMinute > 0) {
-                            currentMinuteLoss += Math.abs(netResult);
-                            rollingLossArr.push({ time: Date.now(), amount: Math.abs(netResult) });
+                            offsetExecuted2 = true;
+
+                            if (reason.includes('STOP LOSS V2') && smartOffsetMaxLossPerMinute > 0) {
+                                currentMinuteLoss += Math.abs(netResult);
+                                rollingLossArr.push({ time: Date.now(), amount: Math.abs(netResult) });
+                            }
                         }
                     }
                 }
