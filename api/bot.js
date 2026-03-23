@@ -85,7 +85,16 @@ const SettingsSchema = new mongoose.Schema({
     minuteCloseTpMaxPnl: { type: Number, default: 0 },
     minuteCloseSlMinPnl: { type: Number, default: 0 }, 
     minuteCloseSlMaxPnl: { type: Number, default: 0 },
-    subAccounts: [SubAccountSchema]
+    subAccounts: [SubAccountSchema],
+    
+    // =============================================
+    // DATABASE-STORED STATE TRACKERS (Survives Reboots)
+    // =============================================
+    currentGlobalPeak: { type: Number, default: 0 },
+    lastStopLossTime: { type: Number, default: 0 },
+    lastNoPeakSlTime: { type: Number, default: 0 },
+    rollingStopLosses: { type: Array, default: [] },
+    autoDynamicLastExecution: { type: Object, default: null }
 });
 const Settings = mongoose.models.Settings || mongoose.model('Settings', SettingsSchema);
 
@@ -103,19 +112,9 @@ const OffsetRecord = mongoose.models.OffsetRecord || mongoose.model('OffsetRecor
 // ==========================================
 // 3. MULTI-PROFILE BOT ENGINE STATE
 // ==========================================
+// We only keep functional instances (HTTP connections, Timers) in memory.
 global.activeBots = global.activeBots || new Map();
-global.globalPnlPeaks = global.globalPnlPeaks || new Map(); 
-global.lastStopLossExecutions = global.lastStopLossExecutions || new Map(); 
-global.rollingStopLosses = global.rollingStopLosses || new Map(); 
-global.autoDynamicExecutions = global.autoDynamicExecutions || new Map(); 
-global.lastNoPeakSlExecutions = global.lastNoPeakSlExecutions || new Map(); 
-
 const activeBots = global.activeBots;
-const globalPnlPeaks = global.globalPnlPeaks;
-const lastStopLossExecutions = global.lastStopLossExecutions;
-const rollingStopLosses = global.rollingStopLosses;
-const autoDynamicExecutions = global.autoDynamicExecutions;
-const lastNoPeakSlExecutions = global.lastNoPeakSlExecutions;
 
 function logForProfile(profileId, msg) {
     console.log(`[Profile: ${profileId}] ${msg}`);
@@ -380,12 +379,14 @@ const executeOneMinuteCloser = async () => {
                 if (!executedGroup && (isPositiveMatch || isNegativeMatch)) {
                     const executionType = isPositiveMatch ? "Group Take Profit" : "Group Stop Loss";
                     
-                    autoDynamicExecutions.set(dbUserId, {
+                    const autoDynData = {
                         time: Date.now(),
                         type: executionType,
                         symbol: `Group up to Row ${i + 1} (WINNERS ONLY)`,
                         pnl: runningAccumulation
-                    });
+                    };
+                    
+                    await Settings.updateOne({ userId: dbUserId }, { $set: { autoDynamicLastExecution: autoDynData } }).catch(console.error);
 
                     logForProfile(activeCandidates[0].profileId, `⏳ 1-Min Group Closer: Group Accumulation $${runningAccumulation.toFixed(4)} matches boundary. Closing ${i + 1} WINNERS ONLY.`);
 
@@ -423,6 +424,7 @@ const executeGlobalProfitMonitor = async () => {
         
         for (let userSetting of usersSettings) {
             const dbUserId = String(userSetting.userId);
+            let dbUpdates = {}; // Accumulate database updates securely
             
             const globalTargetPnl = parseFloat(userSetting.globalTargetPnl) || 0;
             const globalTrailingPnl = parseFloat(userSetting.globalTrailingPnl) || 0;
@@ -436,14 +438,21 @@ const executeGlobalProfitMonitor = async () => {
             const smartOffsetMaxLossPerMinute = parseFloat(userSetting.smartOffsetMaxLossPerMinute) || 0;
             const smartOffsetMaxLossTimeframeSeconds = parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds) || 60;
             const timeframeMs = smartOffsetMaxLossTimeframeSeconds * 1000;
+
+            let currentGlobalPeak = userSetting.currentGlobalPeak || 0;
+            let lastStopLossTime = userSetting.lastStopLossTime || 0;
+            let lastNoPeakSlTime = userSetting.lastNoPeakSlTime || 0;
             
             let globalUnrealized = 0;
             let activeCandidates = [];
             let firstProfileId = null; 
 
-            let rollingLossArr = rollingStopLosses.get(dbUserId) || [];
+            let rollingLossArr = userSetting.rollingStopLosses || [];
+            const originalRollingLen = rollingLossArr.length;
             rollingLossArr = rollingLossArr.filter(record => Date.now() - record.time < timeframeMs);
-            rollingStopLosses.set(dbUserId, rollingLossArr);
+            if (rollingLossArr.length !== originalRollingLen) {
+                dbUpdates.rollingStopLosses = rollingLossArr;
+            }
             let currentMinuteLoss = rollingLossArr.reduce((sum, record) => sum + record.amount, 0);
 
             for (let [profileId, botData] of activeBots.entries()) {
@@ -535,7 +544,7 @@ const executeGlobalProfitMonitor = async () => {
                     if (smartOffsetMaxLossPerMinute > 0) {
                         if (currentMinuteLoss + Math.abs(projectedLoss) <= smartOffsetMaxLossPerMinute) allowSl = true;
                     } else {
-                        if (Date.now() - (lastStopLossExecutions.get(dbUserId) || 0) >= timeframeMs) allowSl = true;
+                        if (Date.now() - lastStopLossTime >= timeframeMs) allowSl = true;
                     }
 
                     if (allowSl) {
@@ -543,7 +552,10 @@ const executeGlobalProfitMonitor = async () => {
                         reason = `STOP LOSS (Full Group hit limit: $${limitVal.toFixed(4)})`;
                         finalNetProfit = runningAccumulation; 
                         
-                        if(smartOffsetMaxLossPerMinute <= 0) lastStopLossExecutions.set(dbUserId, Date.now());
+                        if(smartOffsetMaxLossPerMinute <= 0) {
+                            lastStopLossTime = Date.now();
+                            dbUpdates.lastStopLossTime = lastStopLossTime;
+                        }
 
                         for(let i = 0; i < totalPairs; i++) {
                             finalPairsToClose.push(activeCandidates[i]); // ONLY PUSH WINNERS
@@ -553,7 +565,7 @@ const executeGlobalProfitMonitor = async () => {
                 // Stop Loss (NO PEAK FOUND <= 0.0000 -> Lowest PNL Coin)
                 else if (peakRowIndex === -1 || peakAccumulation < 0.0001) {
                     let allowNoPeakSl = false;
-                    if (Date.now() - (lastNoPeakSlExecutions.get(dbUserId) || 0) >= 60000) allowNoPeakSl = true;
+                    if (Date.now() - lastNoPeakSlTime >= 60000) allowNoPeakSl = true;
 
                     if (allowNoPeakSl) {
                         triggerOffset = true;
@@ -565,7 +577,8 @@ const executeGlobalProfitMonitor = async () => {
                         finalNetProfit = absoluteWorstCoin.unrealizedPnl;
                         finalPairsToClose.push(absoluteWorstCoin);
 
-                        lastNoPeakSlExecutions.set(dbUserId, Date.now());
+                        lastNoPeakSlTime = Date.now();
+                        dbUpdates.lastNoPeakSlTime = lastNoPeakSlTime;
                     }
                 }
 
@@ -594,7 +607,7 @@ const executeGlobalProfitMonitor = async () => {
 
                         if (finalPairsToClose.length === 0) triggerOffset = false;
                     } else if (isNoPeakSl) {
-                        // Soft Check for Lowest PNL (We want to close it even if it dropped further)
+                        // Soft Check for Lowest PNL
                         let actualPairsToClose = [];
                         let liveCheckNet = 0;
                         for (let k = 0; k < finalPairsToClose.length; k++) {
@@ -645,6 +658,7 @@ const executeGlobalProfitMonitor = async () => {
                         if (finalNetProfit < 0 && smartOffsetMaxLossPerMinute > 0) {
                             currentMinuteLoss += Math.abs(finalNetProfit);
                             rollingLossArr.push({ time: Date.now(), amount: Math.abs(finalNetProfit) });
+                            dbUpdates.rollingStopLosses = rollingLossArr;
                         }
                     }
                 }
@@ -674,19 +688,21 @@ const executeGlobalProfitMonitor = async () => {
                         if (smartOffsetMaxLossPerMinute > 0) {
                             if (currentMinuteLoss + Math.abs(netResult) <= smartOffsetMaxLossPerMinute) allowSl = true;
                         } else {
-                            if (Date.now() - (lastStopLossExecutions.get(dbUserId) || 0) >= timeframeMs) allowSl = true;
+                            if (Date.now() - lastStopLossTime >= timeframeMs) allowSl = true;
                         }
 
                         if (allowSl) {
                             triggerOffset = true; 
                             reason = `STOP LOSS V2 (Limit: $${smartOffsetStopLoss2.toFixed(4)})`;
-                            if (smartOffsetMaxLossPerMinute <= 0) lastStopLossExecutions.set(dbUserId, Date.now());
+                            if (smartOffsetMaxLossPerMinute <= 0) {
+                                lastStopLossTime = Date.now();
+                                dbUpdates.lastStopLossTime = lastStopLossTime;
+                            }
                         }
                     }
                     
                     if (triggerOffset) {
                         let closeW = true;
-                        let closeL = false; 
 
                         if (reason.includes("TAKE PROFIT V2")) {
                             const bStateW = activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol];
@@ -720,51 +736,59 @@ const executeGlobalProfitMonitor = async () => {
                             if (reason.includes('STOP LOSS V2') && smartOffsetMaxLossPerMinute > 0) {
                                 currentMinuteLoss += Math.abs(netResult);
                                 rollingLossArr.push({ time: Date.now(), amount: Math.abs(netResult) });
+                                dbUpdates.rollingStopLosses = rollingLossArr;
                             }
                         }
                     }
                 }
             }
 
-            if (offsetExecuted) continue;
+            if (!offsetExecuted) {
+                if (globalTargetPnl > 0) {
+                    let executeGlobalClose = false;
 
-            if (globalTargetPnl > 0) {
-                let executeGlobalClose = false;
-
-                if (globalUnrealized >= globalTargetPnl) {
-                    const currentPeak = globalPnlPeaks.get(dbUserId) || 0;
-                    if (globalUnrealized > currentPeak) {
-                        globalPnlPeaks.set(dbUserId, globalUnrealized);
-                        logForProfile(firstProfileId, `📈 GLOBAL TARGET HIT: Peak Portfolio Profit is $${globalUnrealized.toFixed(2)}. Waiting for a $${globalTrailingPnl} drop to secure profits...`);
+                    if (globalUnrealized >= globalTargetPnl) {
+                        if (globalUnrealized > currentGlobalPeak) {
+                            currentGlobalPeak = globalUnrealized;
+                            dbUpdates.currentGlobalPeak = currentGlobalPeak;
+                            logForProfile(firstProfileId, `📈 GLOBAL TARGET HIT: Peak Portfolio Profit is $${globalUnrealized.toFixed(2)}. Waiting for a $${globalTrailingPnl} drop to secure profits...`);
+                        }
                     }
-                }
-                
-                if (globalPnlPeaks.has(dbUserId)) {
-                    const peak = globalPnlPeaks.get(dbUserId);
-                    if ((peak - globalUnrealized) >= globalTrailingPnl) executeGlobalClose = true;
-                }
-
-                if (executeGlobalClose) {
-                    logForProfile(firstProfileId, `🌍 GLOBAL PORTFOLIO CLOSE TRIGGERED! Securing Total Portfolio Net Profit: $${globalUnrealized.toFixed(4)} (ONLY CLOSING WINNERS)`);
-                    globalPnlPeaks.delete(dbUserId); 
                     
-                    for (let pos of activeCandidates) {
-                        if (pos.unrealizedPnl <= 0) continue; 
-                        try {
-                            const bData = activeBots.get(pos.profileId);
-                            if (bData && bData.state.coinStates[pos.symbol]) {
-                                bData.state.coinStates[pos.symbol].lockUntil = Date.now() + 10000;
-                                bData.state.coinStates[pos.symbol].contracts = 0;
-                                bData.state.coinStates[pos.symbol].unrealizedPnl = 0;
-                            }
-                            const orderSide = pos.side === 'long' ? 'sell' : 'buy';
-                            await pos.exchange.createOrder(pos.symbol, 'market', orderSide, pos.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: pos.leverage });
-                            pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
-                            await Settings.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
-                        } catch(e) {}
+                    if (currentGlobalPeak > 0) {
+                        if ((currentGlobalPeak - globalUnrealized) >= globalTrailingPnl) executeGlobalClose = true;
+                    }
+
+                    if (executeGlobalClose) {
+                        logForProfile(firstProfileId, `🌍 GLOBAL PORTFOLIO CLOSE TRIGGERED! Securing Total Portfolio Net Profit: $${globalUnrealized.toFixed(4)} (ONLY CLOSING WINNERS)`);
+                        
+                        currentGlobalPeak = 0;
+                        dbUpdates.currentGlobalPeak = 0;
+                        
+                        for (let pos of activeCandidates) {
+                            if (pos.unrealizedPnl <= 0) continue; 
+                            try {
+                                const bData = activeBots.get(pos.profileId);
+                                if (bData && bData.state.coinStates[pos.symbol]) {
+                                    bData.state.coinStates[pos.symbol].lockUntil = Date.now() + 10000;
+                                    bData.state.coinStates[pos.symbol].contracts = 0;
+                                    bData.state.coinStates[pos.symbol].unrealizedPnl = 0;
+                                }
+                                const orderSide = pos.side === 'long' ? 'sell' : 'buy';
+                                await pos.exchange.createOrder(pos.symbol, 'market', orderSide, pos.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: pos.leverage });
+                                pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
+                                await Settings.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
+                            } catch(e) {}
+                        }
                     }
                 }
             }
+            
+            // Push all DB updates to survive reboots!
+            if (Object.keys(dbUpdates).length > 0) {
+                await Settings.updateOne({ userId: dbUserId }, { $set: dbUpdates }).catch(console.error);
+            }
+            
         }
     } catch (err) {
         console.error("Global Profit Monitor Error:", err);
@@ -934,15 +958,13 @@ app.get('/api/status', authMiddleware, async (req, res) => {
     }
 
     let currentMinuteLoss = 0;
-    const dbUserId = req.userId.toString();
     const timeframeSec = settings ? (settings.smartOffsetMaxLossTimeframeSeconds || 60) : 60;
-    if (rollingStopLosses.has(dbUserId)) {
-        let arr = rollingStopLosses.get(dbUserId).filter(r => Date.now() - r.time < (timeframeSec * 1000));
+    if (settings && settings.rollingStopLosses) {
+        let arr = settings.rollingStopLosses.filter(r => Date.now() - r.time < (timeframeSec * 1000));
         currentMinuteLoss = arr.reduce((sum, r) => sum + r.amount, 0);
-        rollingStopLosses.set(dbUserId, arr); 
     }
 
-    const autoDynExec = global.autoDynamicExecutions ? global.autoDynamicExecutions.get(dbUserId) : null;
+    const autoDynExec = settings ? settings.autoDynamicLastExecution : null;
 
     res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec });
 });
