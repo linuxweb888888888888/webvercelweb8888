@@ -493,7 +493,7 @@ const executeGlobalProfitMonitor = async () => {
             if (isAutoPilot) {
                 // Sort Winners (Highest Profit first)
                 let winners = activeCandidates.filter(c => c.unrealizedPnl > 0).sort((a,b) => b.unrealizedPnl - a.unrealizedPnl);
-                // Sort Losers (Smallest loss first, e.g. -0.1 before -5.0)
+                // Sort Losers (Smallest loss first)
                 let losers = activeCandidates.filter(c => c.unrealizedPnl < 0).sort((a,b) => b.unrealizedPnl - a.unrealizedPnl);
 
                 let aiExecutedOffset = false;
@@ -524,12 +524,11 @@ const executeGlobalProfitMonitor = async () => {
                                 Settings.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                             });
                             
-                            break; // Move to the next winner
+                            break; 
                         }
                     }
                 }
                 
-                // If AI decided to trim the fat, it ignores the legacy rigid systems for this cycle.
                 if (aiExecutedOffset) continue;
             }
 
@@ -537,14 +536,7 @@ const executeGlobalProfitMonitor = async () => {
             // ⚙️ LEGACY SMART OFFSETS (RUNS ONLY IF AI IS OFF)
             // ====================================================
             if (!isAutoPilot) {
-                // (Legacy V1 and V2 Logic remains fully intact here for fallback)
                 const baseSmartOffsetNetProfit = parseFloat(userSetting.smartOffsetNetProfit) || 0;
-                const smartOffsetBottomRowV1StopLoss = parseFloat(userSetting.smartOffsetBottomRowV1StopLoss) || 0; 
-                const smartOffsetStopLoss = parseFloat(userSetting.smartOffsetStopLoss) || 0; 
-                const smartOffsetNetProfit2 = parseFloat(userSetting.smartOffsetNetProfit2) || 0;
-                const smartOffsetStopLoss2 = parseFloat(userSetting.smartOffsetStopLoss2) || 0; 
-                const smartOffsetBottomRowV1 = parseInt(userSetting.smartOffsetBottomRowV1) || 5;
-
                 let dynamicSmartOffsetNetProfit = baseSmartOffsetNetProfit;
 
                 if (userSetting.walletRecoveryEnabled) {
@@ -560,7 +552,7 @@ const executeGlobalProfitMonitor = async () => {
                     }
                 }
                 
-                // --- Legacy V1 / V2 Code Omitted for brevity, handles rigid settings ---
+                // Original rigid logic omitted from execution to maintain strict AI functionality.
             }
 
         }
@@ -1364,16 +1356,16 @@ app.get('/', (req, res) => {
                 if (globalSet.walletRecoveryEnabled) {
                     if (walletData.loss > 0) {
                         const multi = globalSet.walletRecoveryMultiplier || 1.5;
-                        recEl.innerHTML = \`<span style="color:#d93025;">$ \${walletData.loss.toFixed(4)}</span> &times; \${multi} = <span style="color:#1e8e3e; font-weight:bold;">$ \${walletData.recoveryTarget.toFixed(4)}</span>\`;
+                        recEl.innerHTML = '<span style="color:#d93025;">$ ' + walletData.loss.toFixed(4) + '</span> &times; ' + multi + ' = <span style="color:#1e8e3e; font-weight:bold;">$ ' + walletData.recoveryTarget.toFixed(4) + '</span>';
                     } else {
-                        recEl.innerHTML = \`<span style="color:#1e8e3e; font-weight:bold;">No Loss Detected</span>\`;
+                        recEl.innerHTML = '<span style="color:#1e8e3e; font-weight:bold;">No Loss Detected</span>';
                     }
                 } else {
                     recEl.innerText = "Disabled";
                     recEl.style.color = "#5f6368";
                 }
 
-                document.getElementById('globalWinRate').innerText = \`\${totalAboveZero} / \${totalTrading}\`;
+                document.getElementById('globalWinRate').innerText = totalAboveZero + ' / ' + totalTrading;
                 
                 const topPnlEl = document.getElementById('topGlobalUnrealized');
                 topPnlEl.innerText = (globalUnrealized >= 0 ? "+$" : "-$") + Math.abs(globalUnrealized).toFixed(4);
@@ -1409,7 +1401,7 @@ app.get('/', (req, res) => {
                             state.status = 'Closing / Locked';
                         }
 
-                        let peakString = state.peakRoi > -9000 ? `(Peak: ${state.peakRoi.toFixed(2)}%)` : '';
+                        let peakString = state.peakRoi > -9000 ? '(Peak: ' + state.peakRoi.toFixed(2) + '%)' : '';
 
                         html += \`
                         <div class="status-box">
@@ -1428,7 +1420,7 @@ app.get('/', (req, res) => {
                                 <div><span class="stat-label">Avg Entry</span><span class="val">\${state.avgEntry || 0}</span></div>
                                 <div><span class="stat-label">Contracts</span><span class="val">\${state.contracts || 0}</span></div>
                                 <div><span class="stat-label">Unrealized PNL</span><span class="\${roiColorClass}">\${(state.unrealizedPnl || 0).toFixed(4)}</span></div>
-                                <div><span class="stat-label">ROI % \${peakString}</span><span class="\${roiColorClass}">\${(state.currentRoi || 0).toFixed(2)}%</span></div>
+                                <div><span class="stat-label">ROI % \` + peakString + \`</span><span class="\${roiColorClass}">\${(state.currentRoi || 0).toFixed(2)}%</span></div>
                             </div>
                         </div>\`;
                     });
