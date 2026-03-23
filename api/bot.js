@@ -364,7 +364,7 @@ const executeOneMinuteCloser = async () => {
             const tpMin = Math.min(rawTpMin, rawTpMax);
             const tpMax = Math.max(rawTpMin, rawTpMax);
             const slMin = Math.min(rawSlMin, rawSlMax); 
-            const slMax = Math.max(rawSlMin, rawSlMax); 
+            const slMax = Math.max(rawSlMax, rawSlMin); 
 
             if (tpMax === 0 && slMax === 0) continue; 
 
@@ -530,10 +530,24 @@ const executeGlobalProfitMonitor = async () => {
                 if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation > 0 && peakRowIndex >= 0) {
                     triggerOffset = true;
                     reason = `TAKE PROFIT (Harvested Peak at Row ${peakRowIndex + 1}, Target: $${targetV1.toFixed(4)})`;
-                    finalNetProfit = peakAccumulation;
+                    finalNetProfit = 0; // Recalculate based on what actually gets closed
+                    
                     for(let i = 0; i <= peakRowIndex; i++) {
-                        finalPairsToClose.push(activeCandidates[i]);
-                        finalPairsToClose.push(activeCandidates[totalCoins - totalPairs + i]);
+                        const w = activeCandidates[i];
+                        const l = activeCandidates[totalCoins - totalPairs + i];
+                        
+                        // ONLY IF PEAK HIT: Skip closing pairs if both winner and loser PNL has magnitude 0.0002 or less
+                        if (Math.abs(w.unrealizedPnl) <= 0.0002 && Math.abs(l.unrealizedPnl) <= 0.0002) {
+                            continue;
+                        }
+
+                        finalPairsToClose.push(w);
+                        finalPairsToClose.push(l);
+                        finalNetProfit += (w.unrealizedPnl + l.unrealizedPnl);
+                    }
+                    
+                    if (finalPairsToClose.length === 0) {
+                        triggerOffset = false; // Abort if all pairs within the peak were skipped
                     }
                 } 
                 // Stop Losses (Full Group)
@@ -594,7 +608,6 @@ const executeGlobalProfitMonitor = async () => {
                         currentMinuteLoss += Math.abs(finalNetProfit);
                         rollingLossArr.push({ time: Date.now(), amount: Math.abs(finalNetProfit) });
                     }
-                    break;
                 }
             }
 
@@ -618,7 +631,20 @@ const executeGlobalProfitMonitor = async () => {
                     if (smartOffsetNetProfit2 > 0 && netResult >= targetV2) {
                         triggerOffset = true; reason = `TAKE PROFIT V2 (Target: $${targetV2.toFixed(4)})`;
                     } else if (v2SlEnabled && smartOffsetStopLoss2 < 0 && netResult <= smartOffsetStopLoss2) {
-                        triggerOffset = true; reason = `STOP LOSS V2 (Limit: $${smartOffsetStopLoss2.toFixed(4)})`;
+                        
+                        // Check Stop Loss Execution Limits for V2
+                        let allowSl = false;
+                        if (smartOffsetMaxLossPerMinute > 0) {
+                            if (currentMinuteLoss + Math.abs(netResult) <= smartOffsetMaxLossPerMinute) allowSl = true;
+                        } else {
+                            if (Date.now() - (lastStopLossExecutions.get(dbUserId) || 0) >= timeframeMs) allowSl = true;
+                        }
+
+                        if (allowSl) {
+                            triggerOffset = true; 
+                            reason = `STOP LOSS V2 (Limit: $${smartOffsetStopLoss2.toFixed(4)})`;
+                            if (smartOffsetMaxLossPerMinute <= 0) lastStopLossExecutions.set(dbUserId, Date.now());
+                        }
                     }
                     
                     if (triggerOffset) {
@@ -643,9 +669,14 @@ const executeGlobalProfitMonitor = async () => {
                         await Settings.updateOne({ "subAccounts._id": biggestLoser.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestLoser.subAccount.realizedPnl } }).catch(()=>{});
                         
                         offsetExecuted2 = true;
+
+                        // Track the loss to prevent rapid repeated V2 SLs in the same minute
+                        if (reason.includes('STOP LOSS V2') && smartOffsetMaxLossPerMinute > 0) {
+                            currentMinuteLoss += Math.abs(netResult);
+                            rollingLossArr.push({ time: Date.now(), amount: Math.abs(netResult) });
+                        }
                     }
                 }
-                if (offsetExecuted2) continue; 
             }
 
             if (offsetExecuted) continue;
@@ -1713,7 +1744,7 @@ app.get('/', (req, res) => {
                         if (targetV1 > 0 && peakAccumulation >= targetV1 && peakRowIndex >= 0) {
                             topStatusMessage = \`<span style="color:#1e8e3e; font-weight:bold;">🔥 Target Reached! Slicing at Row \${peakRowIndex + 1} to harvest Peak Profit ($\${peakAccumulation.toFixed(4)})!</span>\`;
                             executingPeak = true;
-                        } else if (isHitNthSl || isHitFullGroupSl) {
+                        } else if (isHitFullGroupSl) { // Nth Row SL no longer executes V1 SL, so we only check Full Group SL
                             let projectedLoss = runningAccumulation; 
                             let blockedByLimit = false;
 
@@ -1725,11 +1756,7 @@ app.get('/', (req, res) => {
                                 topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">🛑 Stop Loss Reached but Blocked by \${timeframeSec}s Limit!</span>\`;
                             } else {
                                 executingSl = true;
-                                if (isHitFullGroupSl) {
-                                    topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">🔥 Stop Loss Hit (Full Group dropped to/below $\${fullGroupSl.toFixed(4)})!</span>\`;
-                                } else {
-                                    topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">🔥 Stop Loss Hit (Nth Row [\${bottomRowN}] dropped to/below $\${stopLossNth.toFixed(4)})!</span>\`;
-                                }
+                                topStatusMessage = \`<span style="color:#d93025; font-weight:bold;">🔥 Stop Loss Hit (Full Group dropped to/below $\${fullGroupSl.toFixed(4)})!</span>\`;
                             }
                         } else {
                             let pColor = peakAccumulation > 0 ? '#1e8e3e' : '#5f6368';
@@ -1748,7 +1775,13 @@ app.get('/', (req, res) => {
                             
                             let statusIcon = '⏳ Waiting';
                             if (executingPeak) {
-                                if (i <= peakRowIndex) statusIcon = '🔥 Harvesting Peak';
+                                if (i <= peakRowIndex) {
+                                    if (Math.abs(w.pnl) <= 0.0002 && Math.abs(l.pnl) <= 0.0002) {
+                                        statusIcon = '⏸️ Skipped (PNL &le; 0.0002)';
+                                    } else {
+                                        statusIcon = '🔥 Harvesting Peak';
+                                    }
+                                }
                                 else statusIcon = '⏸️ Ignored (Past Peak)';
                             } else if (executingSl) {
                                 statusIcon = '🔥 Executing (SL)';
@@ -1774,7 +1807,7 @@ app.get('/', (req, res) => {
                                 <td style="padding:12px; border-bottom:1px solid #eee; color:\${nColor}; font-weight:700; background: #f8f9fa;">\${net >= 0 ? '+' : ''}$\${net.toFixed(4)}</td>
                                 <td style="padding:12px; border-bottom:1px solid #eee; color:\${cColor}; font-weight:700; background: #e8f0fe;">
                                     \${displayAccumulation >= 0 ? '+' : ''}$\${displayAccumulation.toFixed(4)}
-                                    \${i === targetRefIndex ? '<br><span style="font-size:0.7em; color:#f29900;">★ Nth Row Ref</span>' : ''}
+                                    \${i === targetRefIndex ? '<br><span style="font-size:0.7em; color:#f29900;">★ Nth Row Ref Gate</span>' : ''}
                                 </td>
                             </tr>\`;
                         }
@@ -1784,7 +1817,7 @@ app.get('/', (req, res) => {
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
                                 <div>🎯 Strict Take Profit: $\${targetV1.toFixed(4)}</div>
                                 <div>🛑 Full Group Stop: $\${fullGroupSl.toFixed(4)}</div>
-                                <div>🛑 Row \${bottomRowN} Stop: $\${stopLossNth.toFixed(4)}</div>
+                                <div><span style="color:#f29900;">★</span> Row \${bottomRowN} Gate Limit: $\${stopLossNth.toFixed(4)}</div>
                             </div>
                             \${lossTrackerHtml}
                             <div style="margin-top: 10px; padding-top: 10px; border-top: 1px dashed #b3d4ff; font-size: 1.1em;">
@@ -1847,8 +1880,20 @@ app.get('/', (req, res) => {
                                 statusIcon = '🔥 Executing (TP)...';
                                 topStatusMessage2 = \`<span style="color:#1e8e3e; font-weight:bold;">🔥 Executing Pair \${winnerIndex+1} & \${loserIndex+1} for TP!</span>\`;
                             } else if (isSlHit) {
-                                statusIcon = '🛑 Executing (SL)...';
-                                topStatusMessage2 = \`<span style="color:#d93025; font-weight:bold;">🛑 Executing Pair \${winnerIndex+1} & \${loserIndex+1} for SL!</span>\`;
+                                let blockedByLimit = false;
+                                if (maxLossPerMin > 0 && (currentMinuteLoss + Math.abs(net)) > maxLossPerMin) {
+                                    blockedByLimit = true;
+                                }
+
+                                if (blockedByLimit) {
+                                    statusIcon = '🛑 Blocked by Limit';
+                                    if (topStatusMessage2.includes('Evaluating')) {
+                                        topStatusMessage2 = \`<span style="color:#d93025; font-weight:bold;">🛑 Stop Loss V2 Reached but Blocked by \${timeframeSec}s Limit!</span>\`;
+                                    }
+                                } else {
+                                    statusIcon = '🛑 Executing (SL)...';
+                                    topStatusMessage2 = \`<span style="color:#d93025; font-weight:bold;">🛑 Executing Pair \${winnerIndex+1} & \${loserIndex+1} for SL!</span>\`;
+                                }
                             } else if (!v2SlEnabled && limitV2 < 0 && net <= limitV2) {
                                 statusIcon = '⏸️ SL Gated (Disabled)';
                             }
