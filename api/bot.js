@@ -60,7 +60,7 @@ const SubAccountSchema = new mongoose.Schema({
     leverage: { type: Number, default: 10 },
     baseQty: { type: Number, default: 1 },
     takeProfitPct: { type: Number, default: 5.0 },
-    stopLossPct: { type: Number, default: -25.0 }, // Re-enabled
+    stopLossPct: { type: Number, default: -25.0 },
     triggerRoiPct: { type: Number, default: -15.0 },
     dcaTargetRoiPct: { type: Number, default: -2.0 },
     maxContracts: { type: Number, default: 1000 },
@@ -75,9 +75,9 @@ const SettingsSchema = new mongoose.Schema({
     smartOffsetNetProfit: { type: Number, default: 0 },
     smartOffsetBottomRowV1: { type: Number, default: 5 }, 
     smartOffsetBottomRowV1StopLoss: { type: Number, default: 0 }, 
-    smartOffsetStopLoss: { type: Number, default: 0 }, // Re-enabled
+    smartOffsetStopLoss: { type: Number, default: 0 },
     smartOffsetNetProfit2: { type: Number, default: 0 }, 
-    smartOffsetStopLoss2: { type: Number, default: 0 }, // Re-enabled
+    smartOffsetStopLoss2: { type: Number, default: 0 },
     smartOffsetMaxLossPerMinute: { type: Number, default: 0 }, 
     smartOffsetMaxLossTimeframeSeconds: { type: Number, default: 60 },
     minuteCloseAutoDynamic: { type: Boolean, default: false },
@@ -85,6 +85,10 @@ const SettingsSchema = new mongoose.Schema({
     minuteCloseTpMaxPnl: { type: Number, default: 0 },
     minuteCloseSlMinPnl: { type: Number, default: 0 }, 
     minuteCloseSlMaxPnl: { type: Number, default: 0 },
+    // NEW: Dynamic Wallet Loss Recovery
+    walletRecoveryEnabled: { type: Boolean, default: false },
+    walletRecoveryMultiplier: { type: Number, default: 1.5 },
+    walletRecoveryWindowMinutes: { type: Number, default: 5 },
     subAccounts: [SubAccountSchema]
 });
 const Settings = mongoose.models.Settings || mongoose.model('Settings', SettingsSchema);
@@ -101,19 +105,21 @@ const OffsetRecordSchema = new mongoose.Schema({
 const OffsetRecord = mongoose.models.OffsetRecord || mongoose.model('OffsetRecord', OffsetRecordSchema);
 
 // ==========================================
-// 3. MULTI-PROFILE BOT ENGINE STATE (Vercel Cached)
+// 3. MULTI-PROFILE BOT ENGINE STATE
 // ==========================================
 global.activeBots = global.activeBots || new Map();
 global.globalPnlPeaks = global.globalPnlPeaks || new Map(); 
 global.lastStopLossExecutions = global.lastStopLossExecutions || new Map(); 
 global.rollingStopLosses = global.rollingStopLosses || new Map(); 
 global.autoDynamicExecutions = global.autoDynamicExecutions || new Map(); 
+global.walletHistory = global.walletHistory || new Map(); // Tracker for dynamic recovery
 
 const activeBots = global.activeBots;
 const globalPnlPeaks = global.globalPnlPeaks;
 const lastStopLossExecutions = global.lastStopLossExecutions;
 const rollingStopLosses = global.rollingStopLosses;
 const autoDynamicExecutions = global.autoDynamicExecutions;
+const walletHistory = global.walletHistory;
 
 function logForProfile(profileId, msg) {
     console.log(`[Profile: ${profileId}] ${msg}`);
@@ -226,7 +232,7 @@ function startBot(userId, subAccount) {
                     cState.margin = margin;
                     cState.currentRoi = margin > 0 ? (unrealizedPnl / margin) * 100 : 0;
 
-                    // TP OR SL (Re-enabled Standard Single-Coin SL)
+                    // TP OR SL
                     const isTakeProfit = cState.currentRoi >= currentSettings.takeProfitPct;
                     const isStopLoss = currentSettings.stopLossPct < 0 && cState.currentRoi <= currentSettings.stopLossPct;
 
@@ -292,8 +298,48 @@ function stopBot(profileId) {
 }
 
 // =========================================================================
-// 4. BACKGROUND TASKS (Protected Singleton for Vercel)
+// 4. BACKGROUND TASKS
 // =========================================================================
+
+// NEW: 1-Minute Live Wallet Tracker & Loss Calculator
+const executeWalletTracker = async () => {
+    try {
+        await connectDB();
+        const usersSettings = await Settings.find({});
+        
+        for (let userSetting of usersSettings) {
+            const dbUserId = String(userSetting.userId);
+            let totalGlobalWalletBalance = 0;
+            let fetchedAny = false;
+
+            // Gather balances across all active subAccounts for this user
+            for (let [profileId, botData] of activeBots.entries()) {
+                if (botData.userId !== dbUserId) continue;
+                try {
+                    const balanceData = await botData.exchange.fetchBalance();
+                    const usdtBalance = balanceData.USDT ? balanceData.USDT.total : 0;
+                    totalGlobalWalletBalance += usdtBalance;
+                    fetchedAny = true;
+                } catch (err) {
+                    // Ignore transient network errors to avoid spam
+                }
+            }
+
+            if (fetchedAny) {
+                let history = walletHistory.get(dbUserId) || [];
+                const now = Date.now();
+                history.push({ time: now, balance: totalGlobalWalletBalance });
+
+                // Keep only the last 60 minutes in memory max (to save space)
+                history = history.filter(h => now - h.time <= 60 * 60 * 1000);
+                walletHistory.set(dbUserId, history);
+            }
+        }
+    } catch (err) {
+        console.error("Wallet Tracker Error:", err);
+    }
+};
+
 const executeOneMinuteCloser = async () => {
     try {
         await connectDB();
@@ -331,7 +377,6 @@ const executeOneMinuteCloser = async () => {
 
             if (totalPairs === 0) continue;
 
-            // 1. AUTO-DYNAMIC GROUP PEAK LOGIC
             if (autoDynamic) {
                 let runningAccumulation = 0;
                 let peakAccumulation = 0;
@@ -339,17 +384,12 @@ const executeOneMinuteCloser = async () => {
                 for (let i = 0; i < totalPairs; i++) {
                     const netResult = activeCandidates[i].pnl + activeCandidates[totalCoins - totalPairs + i].pnl;
                     runningAccumulation += netResult;
-                    if (runningAccumulation > peakAccumulation) {
-                        peakAccumulation = runningAccumulation;
-                    }
+                    if (runningAccumulation > peakAccumulation) peakAccumulation = runningAccumulation;
                 }
 
                 if (peakAccumulation > 0) {
-                    // TP Range captures the Group Peak exactly
                     rawTpMin = peakAccumulation * 0.8;
                     rawTpMax = peakAccumulation * 1.2;
-                    
-                    // SL Range strictly enforces the 2:1 ASYMMETRIC RATIO based on the group peak
                     rawSlMin = -(peakAccumulation * 5.0); 
                     rawSlMax = -(peakAccumulation * 0.5); 
                 } else {
@@ -368,7 +408,6 @@ const executeOneMinuteCloser = async () => {
 
             if (tpMax === 0 && slMax === 0) continue; 
 
-            // 2. EVALUATE GROUP ACCUMULATION AGAINST RANGES
             let runningAccumulation = 0;
             let executedGroup = false;
 
@@ -392,12 +431,10 @@ const executeOneMinuteCloser = async () => {
 
                     logForProfile(activeCandidates[0].profileId, `⏳ 1-Min Group Closer: Group Accumulation $${runningAccumulation.toFixed(4)} matches the ${executionType} boundary. Closing ${(i + 1) * 2} coins.`);
 
-                    // Close all coins inside this exact accumulation group
                     for (let k = 0; k <= i; k++) {
                         const cw = activeCandidates[k];
                         const cl = activeCandidates[totalCoins - totalPairs + k];
                         
-                        // Close Winner
                         cw.cState.lockUntil = Date.now() + 10000;
                         const cwContracts = cw.contracts;
                         cw.cState.contracts = 0; cw.cState.unrealizedPnl = 0; cw.cState.currentRoi = 0;
@@ -405,7 +442,6 @@ const executeOneMinuteCloser = async () => {
                         cw.exchange.createOrder(cw.symbol, 'market', cwOrderSide, cwContracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: cw.subAccount.leverage }).catch(()=>{});
                         cw.subAccount.realizedPnl = (cw.subAccount.realizedPnl || 0) + cw.pnl;
 
-                        // Close Loser
                         cl.cState.lockUntil = Date.now() + 10000;
                         const clContracts = cl.contracts;
                         cl.cState.contracts = 0; cl.cState.unrealizedPnl = 0; cl.cState.currentRoi = 0;
@@ -440,16 +476,45 @@ const executeGlobalProfitMonitor = async () => {
             
             const globalTargetPnl = parseFloat(userSetting.globalTargetPnl) || 0;
             const globalTrailingPnl = parseFloat(userSetting.globalTrailingPnl) || 0;
-            const smartOffsetNetProfit = parseFloat(userSetting.smartOffsetNetProfit) || 0;
+            const baseSmartOffsetNetProfit = parseFloat(userSetting.smartOffsetNetProfit) || 0;
             const smartOffsetBottomRowV1 = parseInt(userSetting.smartOffsetBottomRowV1) || 5;
             const smartOffsetBottomRowV1StopLoss = parseFloat(userSetting.smartOffsetBottomRowV1StopLoss) || 0; 
-            const smartOffsetStopLoss = parseFloat(userSetting.smartOffsetStopLoss) || 0; // Re-enabled Full Group SL
+            const smartOffsetStopLoss = parseFloat(userSetting.smartOffsetStopLoss) || 0; 
             const smartOffsetNetProfit2 = parseFloat(userSetting.smartOffsetNetProfit2) || 0;
-            const smartOffsetStopLoss2 = parseFloat(userSetting.smartOffsetStopLoss2) || 0; // Re-enabled V2 SL
+            const smartOffsetStopLoss2 = parseFloat(userSetting.smartOffsetStopLoss2) || 0; 
             
             const smartOffsetMaxLossPerMinute = parseFloat(userSetting.smartOffsetMaxLossPerMinute) || 0;
             const smartOffsetMaxLossTimeframeSeconds = parseInt(userSetting.smartOffsetMaxLossTimeframeSeconds) || 60;
             const timeframeMs = smartOffsetMaxLossTimeframeSeconds * 1000;
+
+            // WALLET RECOVERY LOGIC (Overrides V1 Target)
+            const walletRecEnabled = userSetting.walletRecoveryEnabled || false;
+            const walletRecMulti = parseFloat(userSetting.walletRecoveryMultiplier) || 1.5;
+            const walletRecWindow = parseInt(userSetting.walletRecoveryWindowMinutes) || 5;
+
+            let dynamicSmartOffsetNetProfit = baseSmartOffsetNetProfit;
+            let currentCalculatedLoss = 0;
+
+            if (walletRecEnabled) {
+                const history = walletHistory.get(dbUserId) || [];
+                const windowMs = walletRecWindow * 60 * 1000;
+                const recentHistory = history.filter(h => Date.now() - h.time <= windowMs);
+
+                if (recentHistory.length > 0) {
+                    const maxBalance = Math.max(...recentHistory.map(h => h.balance));
+                    const currentBalance = recentHistory[recentHistory.length - 1].balance;
+                    
+                    if (maxBalance > currentBalance) {
+                        currentCalculatedLoss = maxBalance - currentBalance;
+                        const recoveryTarget = currentCalculatedLoss * walletRecMulti;
+                        
+                        // Dynamically override the target if the recovery target is higher than the base
+                        if (recoveryTarget > dynamicSmartOffsetNetProfit) {
+                            dynamicSmartOffsetNetProfit = recoveryTarget;
+                        }
+                    }
+                }
+            }
             
             let globalUnrealized = 0;
             let activeCandidates = [];
@@ -481,14 +546,14 @@ const executeGlobalProfitMonitor = async () => {
 
             if (!firstProfileId || activeCandidates.length === 0) continue;
 
-            const targetV1 = smartOffsetNetProfit > 0 ? smartOffsetNetProfit : 0;
+            const targetV1 = dynamicSmartOffsetNetProfit > 0 ? dynamicSmartOffsetNetProfit : 0;
             const stopLossNth = smartOffsetBottomRowV1StopLoss < 0 ? smartOffsetBottomRowV1StopLoss : 0; 
             const targetV2 = smartOffsetNetProfit2 > 0 ? smartOffsetNetProfit2 : 0;
 
             let offsetExecuted = false;
 
-            // SMART OFFSET V1
-            if ((smartOffsetNetProfit > 0 || smartOffsetBottomRowV1StopLoss < 0 || smartOffsetStopLoss < 0) && activeCandidates.length >= 2) {
+            // SMART OFFSET V1 (With injected Dynamic Recovery Target)
+            if ((targetV1 > 0 || stopLossNth < 0 || smartOffsetStopLoss < 0) && activeCandidates.length >= 2) {
                 activeCandidates.sort((a, b) => b.unrealizedPnl - a.unrealizedPnl); 
                 
                 const totalCoins = activeCandidates.length;
@@ -522,20 +587,19 @@ const executeGlobalProfitMonitor = async () => {
                 
                 const isFullGroupSl = (smartOffsetStopLoss < 0 && runningAccumulation <= smartOffsetStopLoss);
 
-                if (smartOffsetNetProfit > 0 && peakAccumulation >= targetV1 && peakAccumulation > 0 && peakRowIndex >= 0) {
+                if (targetV1 > 0 && peakAccumulation >= targetV1 && peakAccumulation > 0 && peakRowIndex >= 0) {
                     triggerOffset = true;
-                    reason = `TAKE PROFIT (Harvested Peak at Row ${peakRowIndex + 1}, Target: $${targetV1.toFixed(4)})`;
+                    reason = `TAKE PROFIT (Harvested Peak at Row ${peakRowIndex + 1}, Target: $${targetV1.toFixed(4)}${currentCalculatedLoss > 0 ? ' [WALLET RECOVERY ACTIVE]' : ''})`;
                     finalNetProfit = peakAccumulation;
                     for(let i = 0; i <= peakRowIndex; i++) {
                         finalPairsToClose.push(activeCandidates[i]);
                         finalPairsToClose.push(activeCandidates[totalCoins - totalPairs + i]);
                     }
                 } 
-                // Stop Losses (Nth Row OR Full Group)
                 else if ((stopLossNth < 0 && nthBottomAccumulation <= stopLossNth) || isFullGroupSl) {
                     let allowSl = false;
                     let limitVal = isFullGroupSl ? smartOffsetStopLoss : stopLossNth;
-                    let projectedLoss = runningAccumulation; // Always uses full accumulation for max loss calculations
+                    let projectedLoss = runningAccumulation;
 
                     if (smartOffsetMaxLossPerMinute > 0) {
                         if (currentMinuteLoss + Math.abs(projectedLoss) <= smartOffsetMaxLossPerMinute) allowSl = true;
@@ -691,13 +755,13 @@ const executeGlobalProfitMonitor = async () => {
     }
 };
 
-// Vercel Singleton Initialization
 const bootstrapBots = async () => {
     if (!global.botLoopsStarted) {
         global.botLoopsStarted = true;
         console.log("🛠 Bootstrapping Background Loops for Vercel...");
         
         setInterval(executeOneMinuteCloser, 60000);
+        setInterval(executeWalletTracker, 60000); // 1-Min Wallet Tracker
         setInterval(executeGlobalProfitMonitor, 6000);
 
         try {
@@ -732,8 +796,8 @@ const authMiddleware = async (req, res, next) => {
 
 app.get('/api/ping', async (req, res) => {
     await connectDB(); 
-    bootstrapBots(); // Keep-alive trigger
-    res.status(200).json({ success: true, message: 'Bot is awake', timestamp: new Date().toISOString(), activeProfiles: activeBots.size });
+    bootstrapBots(); 
+    res.status(200).json({ success: true, message: 'Bot is awake', timestamp: new Date().toISOString() });
 });
 
 app.post('/api/register', async (req, res) => {
@@ -742,7 +806,13 @@ app.post('/api/register', async (req, res) => {
         const { username, password } = req.body;
         const hashedPassword = await bcrypt.hash(password, 10);
         const user = await User.create({ username, password: hashedPassword });
-        await Settings.create({ userId: user._id, subAccounts: [], globalTargetPnl: 0, globalTrailingPnl: 0, smartOffsetNetProfit: 0, smartOffsetBottomRowV1: 5, smartOffsetBottomRowV1StopLoss: 0, smartOffsetStopLoss: 0, smartOffsetNetProfit2: 0, smartOffsetStopLoss2: 0, smartOffsetMaxLossPerMinute: 0, smartOffsetMaxLossTimeframeSeconds: 60, minuteCloseAutoDynamic: false, minuteCloseTpMinPnl: 0, minuteCloseTpMaxPnl: 0, minuteCloseSlMinPnl: 0, minuteCloseSlMaxPnl: 0 });
+        await Settings.create({ 
+            userId: user._id, subAccounts: [], globalTargetPnl: 0, globalTrailingPnl: 0, 
+            smartOffsetNetProfit: 0, smartOffsetBottomRowV1: 5, smartOffsetBottomRowV1StopLoss: 0, smartOffsetStopLoss: 0, 
+            smartOffsetNetProfit2: 0, smartOffsetStopLoss2: 0, smartOffsetMaxLossPerMinute: 0, smartOffsetMaxLossTimeframeSeconds: 60, 
+            minuteCloseAutoDynamic: false, minuteCloseTpMinPnl: 0, minuteCloseTpMaxPnl: 0, minuteCloseSlMinPnl: 0, minuteCloseSlMaxPnl: 0,
+            walletRecoveryEnabled: false, walletRecoveryMultiplier: 1.5, walletRecoveryWindowMinutes: 5 
+        });
         res.json({ success: true, message: 'Registration successful!' });
     } catch (err) {
         res.status(400).json({ error: 'Username already exists or invalid data.' });
@@ -759,14 +829,14 @@ app.post('/api/login', async (req, res) => {
 });
 
 app.get('/api/settings', authMiddleware, async (req, res) => {
-    bootstrapBots(); // Keep-alive trigger
+    bootstrapBots(); 
     const settings = await Settings.findOne({ userId: req.userId });
     res.json(settings);
 });
 
 app.post('/api/settings', authMiddleware, async (req, res) => {
     bootstrapBots();
-    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl } = req.body;
+    const { subAccounts, globalTargetPnl, globalTrailingPnl, smartOffsetNetProfit, smartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss, smartOffsetStopLoss, smartOffsetNetProfit2, smartOffsetStopLoss2, smartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic, minuteCloseTpMinPnl, minuteCloseTpMaxPnl, minuteCloseSlMinPnl, minuteCloseSlMaxPnl, walletRecoveryEnabled, walletRecoveryMultiplier, walletRecoveryWindowMinutes } = req.body;
     
     const existingSettings = await Settings.findOne({ userId: req.userId });
     if (existingSettings && existingSettings.subAccounts) {
@@ -794,7 +864,6 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
     let parsedStopLoss2 = parseFloat(smartOffsetStopLoss2) || 0;
     if (parsedStopLoss2 > 0) parsedStopLoss2 = -parsedStopLoss2; 
 
-    // Independent Group Range Parsing
     let parsedTpMin = Math.abs(parseFloat(minuteCloseTpMinPnl) || 0);
     let parsedTpMax = Math.abs(parseFloat(minuteCloseTpMaxPnl) || 0);
     let parsedSlMin = -Math.abs(parseFloat(minuteCloseSlMinPnl) || 0);
@@ -818,7 +887,10 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
             minuteCloseTpMinPnl: parsedTpMin,
             minuteCloseTpMaxPnl: parsedTpMax,
             minuteCloseSlMinPnl: parsedSlMin,
-            minuteCloseSlMaxPnl: parsedSlMax
+            minuteCloseSlMaxPnl: parsedSlMax,
+            walletRecoveryEnabled: walletRecoveryEnabled === true,
+            walletRecoveryMultiplier: parseFloat(walletRecoveryMultiplier) || 1.5,
+            walletRecoveryWindowMinutes: parseInt(walletRecoveryWindowMinutes) || 5
         }, 
         { returnDocument: 'after' }
     );
@@ -845,15 +917,17 @@ app.post('/api/settings', authMiddleware, async (req, res) => {
 });
 
 app.get('/api/status', authMiddleware, async (req, res) => {
-    bootstrapBots(); // Keep-alive trigger
+    bootstrapBots(); 
     const settings = await Settings.findOne({ userId: req.userId });
     const userStatuses = {};
     for (let [profileId, botData] of activeBots.entries()) {
         if (botData.userId === req.userId.toString()) userStatuses[profileId] = botData.state;
     }
 
-    let currentMinuteLoss = 0;
     const dbUserId = req.userId.toString();
+    
+    // Stop Loss tracking
+    let currentMinuteLoss = 0;
     const timeframeSec = settings ? (settings.smartOffsetMaxLossTimeframeSeconds || 60) : 60;
     if (rollingStopLosses.has(dbUserId)) {
         let arr = rollingStopLosses.get(dbUserId).filter(r => Date.now() - r.time < (timeframeSec * 1000));
@@ -863,7 +937,41 @@ app.get('/api/status', authMiddleware, async (req, res) => {
 
     const autoDynExec = global.autoDynamicExecutions ? global.autoDynamicExecutions.get(dbUserId) : null;
 
-    res.json({ states: userStatuses, subAccounts: settings ? settings.subAccounts : [], globalSettings: settings, currentMinuteLoss, autoDynExec });
+    // Wallet Recovery Data
+    let walletData = { balance: 0, loss: 0, recoveryTarget: 0, isRecovering: false };
+    if (settings && settings.walletRecoveryEnabled) {
+        const history = walletHistory.get(dbUserId) || [];
+        const windowMs = (settings.walletRecoveryWindowMinutes || 5) * 60 * 1000;
+        const recentHistory = history.filter(h => Date.now() - h.time <= windowMs);
+        
+        if (recentHistory.length > 0) {
+            walletData.balance = recentHistory[recentHistory.length - 1].balance;
+            const maxBalance = Math.max(...recentHistory.map(h => h.balance));
+            
+            if (maxBalance > walletData.balance) {
+                walletData.loss = maxBalance - walletData.balance;
+                walletData.recoveryTarget = walletData.loss * (settings.walletRecoveryMultiplier || 1.5);
+                
+                // Set recovery state if recovery target overrides base target
+                if (walletData.recoveryTarget > (settings.smartOffsetNetProfit || 0)) {
+                    walletData.isRecovering = true;
+                }
+            }
+        }
+    } else {
+        // Just send latest balance if feature is off but data exists
+        const history = walletHistory.get(dbUserId) || [];
+        if (history.length > 0) walletData.balance = history[history.length - 1].balance;
+    }
+
+    res.json({ 
+        states: userStatuses, 
+        subAccounts: settings ? settings.subAccounts : [], 
+        globalSettings: settings, 
+        currentMinuteLoss, 
+        autoDynExec,
+        walletData 
+    });
 });
 
 app.get('/api/offsets', authMiddleware, async (req, res) => {
@@ -993,6 +1101,8 @@ app.get('/', (req, res) => {
                 <!-- GLOBAL STATS BANNER -->
                 <div class="status-box" style="background:#fff3e0; border-color:#ffe0b2; margin-bottom: 24px;">
                     <div class="flex-row" style="justify-content: space-between;">
+                        <div><span class="stat-label">Total Wallet Equity (USDT)</span><span class="val" id="topGlobalWallet" style="color:#202124;">$0.0000</span></div>
+                        <div><span class="stat-label">Wallet Loss / Active Recovery Target</span><span class="val" id="topWalletRecovery" style="color:#f29900;">Disabled / Target Base</span></div>
                         <div><span class="stat-label">Winning / Total Coins Trading</span><span class="val" id="globalWinRate" style="color:#e65100;">0 / 0</span></div>
                         <div><span class="stat-label">Global Unrealized PNL ($)</span><span class="val" id="topGlobalUnrealized">0.0000000000</span></div>
                     </div>
@@ -1012,6 +1122,26 @@ app.get('/', (req, res) => {
                         <h2>Global User Settings</h2>
                         
                         <div style="background: #e8f0fe; padding: 12px; border-radius: 6px; margin-bottom: 16px; border: 1px solid #dadce0;">
+                            
+                            <!-- WALLET RECOVERY SETTINGS -->
+                            <div style="margin-bottom: 16px; border-bottom: 1px solid #cce0ff; padding-bottom: 16px;">
+                                <h4 style="margin: 0 0 8px 0; color: #d93025; display:flex; align-items:center;">
+                                    Live Wallet Peak Recovery
+                                    <input type="checkbox" id="walletRecoveryEnabled" style="width:auto; margin-left:12px; margin-right:4px;"> Enable
+                                </h4>
+                                <p style="font-size:0.75em; color:#5f6368; margin-top:2px; line-height:1.4;">Tracks your live USDT wallet balance over a rolling window. If it drops from the peak, it overrides the Smart Offset V1 Target below with [Loss * Multiplier] to dynamically win back exactly what you lost.</p>
+                                <div class="flex-row">
+                                    <div style="flex:1;">
+                                        <label style="margin-top:0;">Loss Recovery Multiplier</label>
+                                        <input type="number" step="0.1" id="walletRecoveryMultiplier" placeholder="e.g. 1.5">
+                                    </div>
+                                    <div style="flex:1;">
+                                        <label style="margin-top:0;">Rolling Window (Minutes)</label>
+                                        <input type="number" step="1" id="walletRecoveryWindowMinutes" placeholder="e.g. 5">
+                                    </div>
+                                </div>
+                            </div>
+
                             <h4 style="margin: 0 0 8px 0; color: #1a73e8;">Smart Net Profit (Guaranteed Profit > Loss)</h4>
                             
                             <div class="flex-row">
@@ -1195,6 +1325,11 @@ app.get('/', (req, res) => {
             let myMinuteCloseTpMaxPnl = 0;
             let myMinuteCloseSlMinPnl = 0;
             let myMinuteCloseSlMaxPnl = 0;
+            
+            let myWalletRecoveryEnabled = false;
+            let myWalletRecoveryMultiplier = 1.5;
+            let myWalletRecoveryWindowMinutes = 5;
+
             let currentProfileIndex = -1;
             let myCoins = [];
             
@@ -1276,6 +1411,10 @@ app.get('/', (req, res) => {
                 myMinuteCloseTpMaxPnl = config.minuteCloseTpMaxPnl || 0;
                 myMinuteCloseSlMinPnl = config.minuteCloseSlMinPnl || 0;
                 myMinuteCloseSlMaxPnl = config.minuteCloseSlMaxPnl || 0;
+
+                myWalletRecoveryEnabled = config.walletRecoveryEnabled || false;
+                myWalletRecoveryMultiplier = config.walletRecoveryMultiplier || 1.5;
+                myWalletRecoveryWindowMinutes = config.walletRecoveryWindowMinutes || 5;
                 
                 document.getElementById('globalTargetPnl').value = myGlobalTargetPnl;
                 document.getElementById('globalTrailingPnl').value = myGlobalTrailingPnl;
@@ -1293,6 +1432,10 @@ app.get('/', (req, res) => {
                 document.getElementById('minuteCloseTpMaxPnl').value = myMinuteCloseTpMaxPnl;
                 document.getElementById('minuteCloseSlMinPnl').value = myMinuteCloseSlMinPnl;
                 document.getElementById('minuteCloseSlMaxPnl').value = myMinuteCloseSlMaxPnl;
+
+                document.getElementById('walletRecoveryEnabled').checked = myWalletRecoveryEnabled;
+                document.getElementById('walletRecoveryMultiplier').value = myWalletRecoveryMultiplier;
+                document.getElementById('walletRecoveryWindowMinutes').value = myWalletRecoveryWindowMinutes;
 
                 mySubAccounts = config.subAccounts || [];
                 renderSubAccounts();
@@ -1323,8 +1466,12 @@ app.get('/', (req, res) => {
                 myMinuteCloseTpMaxPnl = Math.abs(parseFloat(document.getElementById('minuteCloseTpMaxPnl').value) || 0);
                 myMinuteCloseSlMinPnl = -Math.abs(parseFloat(document.getElementById('minuteCloseSlMinPnl').value) || 0);
                 myMinuteCloseSlMaxPnl = -Math.abs(parseFloat(document.getElementById('minuteCloseSlMaxPnl').value) || 0);
+
+                myWalletRecoveryEnabled = document.getElementById('walletRecoveryEnabled').checked;
+                myWalletRecoveryMultiplier = parseFloat(document.getElementById('walletRecoveryMultiplier').value) || 1.5;
+                myWalletRecoveryWindowMinutes = parseInt(document.getElementById('walletRecoveryWindowMinutes').value) || 5;
                 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, walletRecoveryEnabled: myWalletRecoveryEnabled, walletRecoveryMultiplier: myWalletRecoveryMultiplier, walletRecoveryWindowMinutes: myWalletRecoveryWindowMinutes };
                 await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 alert('Global Settings Saved Successfully!');
             }
@@ -1344,7 +1491,7 @@ app.get('/', (req, res) => {
                 
                 mySubAccounts.push({ name, apiKey: key, secret: secret, side: 'long', leverage: 10, baseQty: 1, takeProfitPct: 5.0, stopLossPct: -25.0, triggerRoiPct: -15.0, dcaTargetRoiPct: -2.0, maxContracts: 1000, realizedPnl: 0, coins: [] });
                 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, walletRecoveryEnabled: myWalletRecoveryEnabled, walletRecoveryMultiplier: myWalletRecoveryMultiplier, walletRecoveryWindowMinutes: myWalletRecoveryWindowMinutes };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -1373,7 +1520,7 @@ app.get('/', (req, res) => {
                     document.getElementById('leverage').value = profile.leverage || 10;
                     document.getElementById('baseQty').value = profile.baseQty || 1;
                     document.getElementById('takeProfitPct').value = profile.takeProfitPct || 5.0;
-                    document.getElementById('stopLossPct').value = profile.stopLossPct || -25.0; // Re-enabled Input
+                    document.getElementById('stopLossPct').value = profile.stopLossPct || -25.0;
                     document.getElementById('triggerRoiPct').value = profile.triggerRoiPct || -15.0;
                     document.getElementById('dcaTargetRoiPct').value = profile.dcaTargetRoiPct || -2.0;
                     document.getElementById('maxContracts').value = profile.maxContracts || 1000;
@@ -1388,7 +1535,7 @@ app.get('/', (req, res) => {
                 const index = parseInt(select.value);
                 if(!isNaN(index) && index >= 0) {
                     mySubAccounts.splice(index, 1);
-                    const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl };
+                    const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, walletRecoveryEnabled: myWalletRecoveryEnabled, walletRecoveryMultiplier: myWalletRecoveryMultiplier, walletRecoveryWindowMinutes: myWalletRecoveryWindowMinutes };
                     const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                     const json = await res.json();
                     mySubAccounts = json.settings.subAccounts || [];
@@ -1464,13 +1611,13 @@ app.get('/', (req, res) => {
                 profile.leverage = parseInt(document.getElementById('leverage').value);
                 profile.baseQty = parseInt(document.getElementById('baseQty').value);
                 profile.takeProfitPct = parseFloat(document.getElementById('takeProfitPct').value);
-                profile.stopLossPct = parseFloat(document.getElementById('stopLossPct').value) || 0; // Re-enabled
+                profile.stopLossPct = parseFloat(document.getElementById('stopLossPct').value) || 0;
                 profile.triggerRoiPct = parseFloat(document.getElementById('triggerRoiPct').value);
                 profile.dcaTargetRoiPct = parseFloat(document.getElementById('dcaTargetRoiPct').value);
                 profile.maxContracts = parseInt(document.getElementById('maxContracts').value);
                 profile.coins = myCoins;
 
-                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl };
+                const data = { subAccounts: mySubAccounts, globalTargetPnl: myGlobalTargetPnl, globalTrailingPnl: myGlobalTrailingPnl, smartOffsetNetProfit: mySmartOffsetNetProfit, smartOffsetBottomRowV1: mySmartOffsetBottomRowV1, smartOffsetBottomRowV1StopLoss: mySmartOffsetBottomRowV1StopLoss, smartOffsetStopLoss: mySmartOffsetStopLoss, smartOffsetNetProfit2: mySmartOffsetNetProfit2, smartOffsetStopLoss2: mySmartOffsetStopLoss2, smartOffsetMaxLossPerMinute: mySmartOffsetMaxLossPerMinute, smartOffsetMaxLossTimeframeSeconds: mySmartOffsetMaxLossTimeframeSeconds, minuteCloseAutoDynamic: myMinuteCloseAutoDynamic, minuteCloseTpMinPnl: myMinuteCloseTpMinPnl, minuteCloseTpMaxPnl: myMinuteCloseTpMaxPnl, minuteCloseSlMinPnl: myMinuteCloseSlMinPnl, minuteCloseSlMaxPnl: myMinuteCloseSlMaxPnl, walletRecoveryEnabled: myWalletRecoveryEnabled, walletRecoveryMultiplier: myWalletRecoveryMultiplier, walletRecoveryWindowMinutes: myWalletRecoveryWindowMinutes };
                 const res = await fetch('/api/settings', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token }, body: JSON.stringify(data) });
                 const json = await res.json();
                 mySubAccounts = json.settings.subAccounts || [];
@@ -1528,6 +1675,7 @@ app.get('/', (req, res) => {
                 const subAccountsUpdated = data.subAccounts || [];
                 const globalSet = data.globalSettings || {};
                 const currentMinuteLoss = data.currentMinuteLoss || 0;
+                const walletData = data.walletData || { balance: 0, loss: 0, recoveryTarget: 0, isRecovering: false };
 
                 let globalTotal = 0;
                 subAccountsUpdated.forEach(sub => {
@@ -1556,6 +1704,20 @@ app.get('/', (req, res) => {
                             }
                         }
                     }
+                }
+
+                // Update Wallet Banner
+                document.getElementById('topGlobalWallet').innerText = '$' + walletData.balance.toFixed(4);
+                const recEl = document.getElementById('topWalletRecovery');
+                if (globalSet.walletRecoveryEnabled) {
+                    if (walletData.isRecovering) {
+                        recEl.innerHTML = \`<span style="color:#d93025;">Loss: $\${walletData.loss.toFixed(4)}</span> / <span style="color:#1e8e3e; font-weight:bold;">Target: $\${walletData.recoveryTarget.toFixed(4)}</span>\`;
+                    } else {
+                        recEl.innerHTML = \`<span style="color:#1e8e3e;">No Loss</span> / Target Base ($\${(globalSet.smartOffsetNetProfit || 0).toFixed(4)})\`;
+                    }
+                } else {
+                    recEl.innerText = "Disabled / Target Base";
+                    recEl.style.color = "#5f6368";
                 }
 
                 const timeframeSec = globalSet.smartOffsetMaxLossTimeframeSeconds || 60;
@@ -1610,7 +1772,6 @@ app.get('/', (req, res) => {
                         slMinInput.value = ''; slMaxInput.value = '';
                     }
 
-                    // Populate UI Tracker
                     let adHtml = '';
                     if (hasDynamicBoundary && tPairs > 0) {
                         let highestGroupAcc = -99999;
@@ -1667,9 +1828,14 @@ app.get('/', (req, res) => {
                     const totalCoins = activeCandidates.length;
                     const totalPairs = Math.floor(totalCoins / 2);
 
-                    const targetV1 = globalSet.smartOffsetNetProfit || 0;
+                    // Grab dynamic target considering wallet recovery
+                    let activeTargetV1 = globalSet.smartOffsetNetProfit || 0;
+                    if (walletData.isRecovering) {
+                        activeTargetV1 = walletData.recoveryTarget;
+                    }
+
                     const stopLossNth = globalSet.smartOffsetBottomRowV1StopLoss || 0; 
-                    const fullGroupSl = globalSet.smartOffsetStopLoss || 0; // Grab full group SL limit
+                    const fullGroupSl = globalSet.smartOffsetStopLoss || 0; 
                     const bottomRowN = globalSet.smartOffsetBottomRowV1 !== undefined ? globalSet.smartOffsetBottomRowV1 : 5;
 
                     if (totalPairs === 0) {
@@ -1707,7 +1873,7 @@ app.get('/', (req, res) => {
                         const isHitNthSl = (stopLossNth < 0 && nthBottomAccumulation <= stopLossNth);
                         const isHitFullGroupSl = (fullGroupSl < 0 && runningAccumulation <= fullGroupSl);
 
-                        if (targetV1 > 0 && peakAccumulation >= targetV1 && peakRowIndex >= 0) {
+                        if (activeTargetV1 > 0 && peakAccumulation >= activeTargetV1 && peakRowIndex >= 0) {
                             topStatusMessage = \`<span style="color:#1e8e3e; font-weight:bold;">🔥 Target Reached! Slicing at Row \${peakRowIndex + 1} to harvest Peak Profit ($\${peakAccumulation.toFixed(4)})!</span>\`;
                             executingPeak = true;
                         } else if (isHitNthSl || isHitFullGroupSl) {
@@ -1730,7 +1896,10 @@ app.get('/', (req, res) => {
                             }
                         } else {
                             let pColor = peakAccumulation > 0 ? '#1e8e3e' : '#5f6368';
-                            topStatusMessage = \`TP Status: <span style="color:#1a73e8; font-weight:bold;">🔎 Seeking Peak &ge; $\${targetV1.toFixed(4)}</span> | Current Peak: <strong style="color:\${pColor}">+\$\${peakAccumulation.toFixed(4)}</strong>\`;
+                            let targetInfo = \`$\${activeTargetV1.toFixed(4)}\`;
+                            if(walletData.isRecovering) targetInfo += \` (🔥 Recovery)\`;
+                            
+                            topStatusMessage = \`TP Status: <span style="color:#1a73e8; font-weight:bold;">🔎 Seeking Peak &ge; \${targetInfo}</span> | Current Peak: <strong style="color:\${pColor}">+\$\${peakAccumulation.toFixed(4)}</strong>\`;
                         }
 
                         let displayAccumulation = 0;
@@ -1779,7 +1948,7 @@ app.get('/', (req, res) => {
                         
                         let dynamicInfoHtml = \`<div style="margin-bottom: 12px; padding: 12px; background: #e8f0fe; border: 1px solid #cce0ff; border-radius: 6px; color: #1a73e8; font-weight: 500;">
                             <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                                <div>🎯 Strict Take Profit: $\${targetV1.toFixed(4)}</div>
+                                <div>🎯 Target (Overrides if Recovery): $\${activeTargetV1.toFixed(4)} \${walletData.isRecovering ? '<span style="color:#d93025; font-size:0.8em;">(Recovering)</span>' : ''}</div>
                                 <div>🛑 Full Group Stop: $\${fullGroupSl.toFixed(4)}</div>
                                 <div>🛑 Row \${bottomRowN} Stop: $\${stopLossNth.toFixed(4)}</div>
                             </div>
@@ -1929,14 +2098,14 @@ app.get('/', (req, res) => {
                 document.getElementById('logs').innerHTML = (stateData.logs || []).join('<br>');
             }
 
-            checkAuth(); // Initialize
+            checkAuth(); 
         </script>
     </body>
     </html>
     `);
 });
 
-// VERCEL EXPORT: Replaces app.listen()
+// VERCEL EXPORT
 if (process.env.NODE_ENV !== 'production') {
     app.listen(PORT, () => console.log(`🚀 Running locally on http://localhost:${PORT}`));
 }
