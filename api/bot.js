@@ -147,6 +147,34 @@ function calculateDcaQty(side, P0, Pc, C0, leverage, targetRoiPct) {
     return Math.ceil(Cn); 
 }
 
+// Aggressive Maximum Leverage Extractor for HTX 
+function getMaxLeverage(exchange, symbol, fallback) {
+    let maxL = fallback;
+    try {
+        const market = exchange.market(symbol);
+        if (market) {
+            if (market.limits && market.limits.leverage && market.limits.leverage.max) {
+                maxL = Math.max(maxL, market.limits.leverage.max);
+            }
+            if (market.info) {
+                ['lever_rate', 'cross_lever_rate', 'max_lever_rate', 'max_cross_lever_rate', 'maxLeverage', 'available_level_rate'].forEach(key => {
+                    if (market.info[key] !== undefined) {
+                        const str = String(market.info[key]);
+                        if (str.includes(',')) {
+                            const maxVal = Math.max(...str.split(',').map(Number).filter(n => !isNaN(n)));
+                            if (maxVal > maxL) maxL = maxVal;
+                        } else {
+                            const num = Number(str);
+                            if (!isNaN(num) && num > maxL) maxL = num;
+                        }
+                    }
+                });
+            }
+        }
+    } catch(e) {}
+    return maxL;
+}
+
 async function startBot(userId, subAccount) {
     const profileId = subAccount._id.toString();
     if (activeBots.has(profileId)) stopBot(profileId);
@@ -205,24 +233,10 @@ async function startBot(userId, subAccount) {
 
             for (let coin of activeCoins) {
                 try {
-                    let activeLeverage = currentSettings.leverage;
-                    try {
-                        const market = exchange.market(coin.symbol);
-                        if (market && market.limits && market.limits.leverage && market.limits.leverage.max) {
-                            activeLeverage = market.limits.leverage.max;
-                        }
-                        // Aggressively parse HTX raw info string to force true maximum leverage
-                        if (activeLeverage === currentSettings.leverage && market && market.info) {
-                            const ratesStr = market.info.cross_lever_rate || market.info.lever_rate;
-                            if (ratesStr) {
-                                const rates = String(ratesStr).split(',').map(Number).filter(n => !isNaN(n));
-                                if (rates.length > 0) activeLeverage = Math.max(...rates);
-                            }
-                        }
-                    } catch(e) {}
+                    const activeLeverage = getMaxLeverage(exchange, coin.symbol, currentSettings.leverage);
                     
-                    // Force maximum leverage while trading and position open
-                    await exchange.setLeverage(activeLeverage, coin.symbol, { marginMode: 'cross' }).catch(()=>{});
+                    // Force absolute maximum leverage via direct cross/mgn parameters continuously
+                    await exchange.setLeverage(activeLeverage, coin.symbol, { marginMode: 'cross', mgnMode: 'cross', lever_rate: activeLeverage, cross_lever_rate: activeLeverage }).catch(()=>{});
 
                     if (!state.coinStates[coin.symbol]) {
                         state.coinStates[coin.symbol] = { status: 'Running', currentPrice: 0, avgEntry: 0, contracts: 0, currentRoi: 0, unrealizedPnl: 0, margin: 0, lastDcaTime: 0, lockUntil: 0 };
@@ -248,10 +262,10 @@ async function startBot(userId, subAccount) {
                         cState.avgEntry = 0; cState.contracts = 0; cState.currentRoi = 0; cState.unrealizedPnl = 0; cState.margin = 0;
                         const safeBaseQty = Math.max(1, Math.floor(currentSettings.baseQty));
                         
-                        logForProfile(profileId, `[${coin.symbol}] 🛒 No position. Opening base position of ${safeBaseQty} contracts (${activeSide}). Forced Lev: ${activeLeverage}x`);
+                        logForProfile(profileId, `[${coin.symbol}] 🛒 No position. Opening base position of ${safeBaseQty} contracts (${activeSide}). Forced Max Lev: ${activeLeverage}x`);
                         cState.lockUntil = Date.now() + 10000; 
                         const orderSide = activeSide === 'long' ? 'buy' : 'sell';
-                        await exchange.createOrder(coin.symbol, 'market', orderSide, safeBaseQty, undefined, { offset: 'open', lever_rate: activeLeverage });
+                        await exchange.createOrder(coin.symbol, 'market', orderSide, safeBaseQty, undefined, { offset: 'open', lever_rate: activeLeverage, cross_lever_rate: activeLeverage });
                         continue; 
                     }
 
@@ -282,7 +296,7 @@ async function startBot(userId, subAccount) {
                         cState.contracts = 0; cState.unrealizedPnl = 0; cState.currentRoi = 0;
 
                         const orderSide = activeSide === 'long' ? 'sell' : 'buy';
-                        await exchange.createOrder(coin.symbol, 'market', orderSide, contractsToClose, undefined, { offset: 'close', reduceOnly: true, lever_rate: activeLeverage }).catch(()=>{});
+                        await exchange.createOrder(coin.symbol, 'market', orderSide, contractsToClose, undefined, { offset: 'close', reduceOnly: true, lever_rate: activeLeverage, cross_lever_rate: activeLeverage }).catch(()=>{});
 
                         currentSettings.realizedPnl = (currentSettings.realizedPnl || 0) + unrealizedPnl;
                         Settings.updateOne({ "subAccounts._id": currentSettings._id }, { $set: { "subAccounts.$.realizedPnl": currentSettings.realizedPnl } }).catch(()=>{});
@@ -302,7 +316,7 @@ async function startBot(userId, subAccount) {
                             logForProfile(profileId, `[${coin.symbol}] ⚡ Executing DCA: Buying ${reqQty} contracts at ~${cState.currentPrice}`);
                             cState.lockUntil = Date.now() + 10000; 
                             const orderSide = activeSide === 'long' ? 'buy' : 'sell';
-                            await exchange.createOrder(coin.symbol, 'market', orderSide, reqQty, undefined, { offset: 'open', lever_rate: activeLeverage }).catch(()=>{});
+                            await exchange.createOrder(coin.symbol, 'market', orderSide, reqQty, undefined, { offset: 'open', lever_rate: activeLeverage, cross_lever_rate: activeLeverage }).catch(()=>{});
                             cState.lastDcaTime = Date.now(); 
                         }
                     }
@@ -448,23 +462,10 @@ const executeOneMinuteCloser = async () => {
                         cw.cState.contracts = 0; cw.cState.unrealizedPnl = 0; cw.cState.currentRoi = 0;
                         const cwOrderSide = cw.side === 'long' ? 'sell' : 'buy';
                         
-                        let activeLeverage = cw.subAccount.leverage;
-                        try {
-                            const market = cw.exchange.market(cw.symbol);
-                            if (market && market.limits && market.limits.leverage && market.limits.leverage.max) {
-                                activeLeverage = market.limits.leverage.max;
-                            }
-                            if (activeLeverage === cw.subAccount.leverage && market && market.info) {
-                                const ratesStr = market.info.cross_lever_rate || market.info.lever_rate;
-                                if (ratesStr) {
-                                    const rates = String(ratesStr).split(',').map(Number).filter(n => !isNaN(n));
-                                    if (rates.length > 0) activeLeverage = Math.max(...rates);
-                                }
-                            }
-                        } catch(e) {}
-
-                        await cw.exchange.setLeverage(activeLeverage, cw.symbol, { marginMode: 'cross' }).catch(()=>{});
-                        cw.exchange.createOrder(cw.symbol, 'market', cwOrderSide, cwContracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: activeLeverage }).catch(()=>{});
+                        const activeLeverage = getMaxLeverage(cw.exchange, cw.symbol, cw.subAccount.leverage);
+                        await cw.exchange.setLeverage(activeLeverage, cw.symbol, { marginMode: 'cross', mgnMode: 'cross', lever_rate: activeLeverage, cross_lever_rate: activeLeverage }).catch(()=>{});
+                        cw.exchange.createOrder(cw.symbol, 'market', cwOrderSide, cwContracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: activeLeverage, cross_lever_rate: activeLeverage }).catch(()=>{});
+                        
                         cw.subAccount.realizedPnl = (cw.subAccount.realizedPnl || 0) + cw.pnl;
                         Settings.updateOne({ "subAccounts._id": cw.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": cw.subAccount.realizedPnl } }).catch(()=>{});
                     }
@@ -531,20 +532,8 @@ const executeGlobalProfitMonitor = async () => {
                         
                         const activeSide = cState.activeSide || botData.settings.coins.find(c => c.symbol === symbol)?.side || botData.settings.side;
                         
-                        let activeLeverage = botData.settings.leverage;
-                        try {
-                            const market = botData.exchange.market(symbol);
-                            if (market && market.limits && market.limits.leverage && market.limits.leverage.max) {
-                                activeLeverage = market.limits.leverage.max;
-                            }
-                            if (activeLeverage === botData.settings.leverage && market && market.info) {
-                                const ratesStr = market.info.cross_lever_rate || market.info.lever_rate;
-                                if (ratesStr) {
-                                    const rates = String(ratesStr).split(',').map(Number).filter(n => !isNaN(n));
-                                    if (rates.length > 0) activeLeverage = Math.max(...rates);
-                                }
-                            }
-                        } catch(e) {}
+                        const activeLeverage = getMaxLeverage(botData.exchange, symbol, botData.settings.leverage);
+                        await botData.exchange.setLeverage(activeLeverage, symbol, { marginMode: 'cross', mgnMode: 'cross', lever_rate: activeLeverage, cross_lever_rate: activeLeverage }).catch(()=>{});
 
                         activeCandidates.push({
                             profileId, symbol, exchange: botData.exchange, unrealizedPnl: pnl,
@@ -708,8 +697,8 @@ const executeGlobalProfitMonitor = async () => {
 
                             try {
                                 const orderSide = pos.side === 'long' ? 'sell' : 'buy';
-                                await pos.exchange.setLeverage(pos.leverage, pos.symbol, { marginMode: 'cross' }).catch(()=>{});
-                                await pos.exchange.createOrder(pos.symbol, 'market', orderSide, pos.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: pos.leverage }).catch(()=>{});
+                                await pos.exchange.setLeverage(pos.leverage, pos.symbol, { marginMode: 'cross', mgnMode: 'cross', lever_rate: pos.leverage, cross_lever_rate: pos.leverage }).catch(()=>{});
+                                await pos.exchange.createOrder(pos.symbol, 'market', orderSide, pos.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: pos.leverage, cross_lever_rate: pos.leverage }).catch(()=>{});
                                 pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
                                 await Settings.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                             } catch (e) {}
@@ -796,8 +785,8 @@ const executeGlobalProfitMonitor = async () => {
                                 const bStateW = activeBots.get(biggestWinner.profileId).state.coinStates[biggestWinner.symbol];
                                 if(bStateW) { bStateW.lockUntil = Date.now() + 10000; bStateW.contracts = 0; }
                                 const wOrderSide = biggestWinner.side === 'long' ? 'sell' : 'buy';
-                                await biggestWinner.exchange.setLeverage(biggestWinner.leverage, biggestWinner.symbol, { marginMode: 'cross' }).catch(()=>{});
-                                await biggestWinner.exchange.createOrder(biggestWinner.symbol, 'market', wOrderSide, biggestWinner.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestWinner.leverage }).catch(()=>{});
+                                await biggestWinner.exchange.setLeverage(biggestWinner.leverage, biggestWinner.symbol, { marginMode: 'cross', mgnMode: 'cross', lever_rate: biggestWinner.leverage, cross_lever_rate: biggestWinner.leverage }).catch(()=>{});
+                                await biggestWinner.exchange.createOrder(biggestWinner.symbol, 'market', wOrderSide, biggestWinner.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: biggestWinner.leverage, cross_lever_rate: biggestWinner.leverage }).catch(()=>{});
                                 biggestWinner.subAccount.realizedPnl = (biggestWinner.subAccount.realizedPnl || 0) + biggestWinner.unrealizedPnl;
                                 await Settings.updateOne({ "subAccounts._id": biggestWinner.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": biggestWinner.subAccount.realizedPnl } }).catch(()=>{});
                             }
@@ -846,8 +835,8 @@ const executeGlobalProfitMonitor = async () => {
                                     bData.state.coinStates[pos.symbol].unrealizedPnl = 0;
                                 }
                                 const orderSide = pos.side === 'long' ? 'sell' : 'buy';
-                                await pos.exchange.setLeverage(pos.leverage, pos.symbol, { marginMode: 'cross' }).catch(()=>{});
-                                await pos.exchange.createOrder(pos.symbol, 'market', orderSide, pos.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: pos.leverage });
+                                await pos.exchange.setLeverage(pos.leverage, pos.symbol, { marginMode: 'cross', mgnMode: 'cross', lever_rate: pos.leverage, cross_lever_rate: pos.leverage }).catch(()=>{});
+                                await pos.exchange.createOrder(pos.symbol, 'market', orderSide, pos.contracts, undefined, { offset: 'close', reduceOnly: true, lever_rate: pos.leverage, cross_lever_rate: pos.leverage });
                                 pos.subAccount.realizedPnl = (pos.subAccount.realizedPnl || 0) + pos.unrealizedPnl;
                                 await Settings.updateOne({ "subAccounts._id": pos.subAccount._id }, { $set: { "subAccounts.$.realizedPnl": pos.subAccount.realizedPnl } }).catch(()=>{});
                             } catch(e) {}
