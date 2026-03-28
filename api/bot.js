@@ -6,7 +6,6 @@
 const express = require('express');
 const ccxt = require('ccxt');
 const { MongoClient } = require('mongodb');
-const dotenv = require('dotenv');
 
 dotenv.config();
 
