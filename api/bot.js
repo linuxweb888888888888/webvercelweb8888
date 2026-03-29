@@ -6,6 +6,17 @@ const app = express();
 // Your NewsAPI Key
 const API_KEY = '5b69e4d348ad436ca832910872c7d663';
 
+// Helper function to create clean URL slugs
+// Example: "Nepal Police Arrest! - AP News" -> "nepal-police-arrest"
+function createSlug(title) {
+    if (!title) return 'news-article';
+    const cleanTitle = title.split(' - ')[0]; // Remove the publisher name
+    return cleanTitle
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-') // Replace non-alphanumeric characters with dashes
+        .replace(/(^-|-$)/g, '');    // Remove dashes from the very beginning or end
+}
+
 // --------------------------------------------------------
 // 1. MAIN ROUTE (Home Page & Search)
 // --------------------------------------------------------
@@ -35,25 +46,24 @@ app.get('/', async (req, res) => {
 });
 
 // --------------------------------------------------------
-// 2. SINGLE ARTICLE BLOG PAGE (SEO Friendly Route)
+// 2. SINGLE ARTICLE BLOG PAGE (SEO Dashed URL Route)
 // --------------------------------------------------------
-app.get('/article/:title', async (req, res) => {
-    const articleTitle = req.params.title;
+app.get('/article/:slug', async (req, res) => {
+    const slug = req.params.slug;
     
-    // FIX 1: Strip out the " - Publisher Name" from the title
-    // Example: "News Headline - AP News" becomes just "News Headline"
-    const cleanTitle = articleTitle.split(' - ')[0];
+    // Turn the dashed URL back into a space-separated search query
+    // Example: "nepal-police-arrest" -> "nepal police arrest"
+    const searchWords = slug.replace(/-/g, ' ');
     
-    // FIX 2: Removed the strict double-quotes from the query so NewsAPI 
-    // does a broader match instead of failing on exact punctuation.
-    const apiUrl = `https://newsapi.org/v2/everything?qInTitle=${encodeURIComponent(cleanTitle)}&pageSize=1&apiKey=${API_KEY}`;
+    // Search NewsAPI for these words in the title
+    const apiUrl = `https://newsapi.org/v2/everything?qInTitle=${encodeURIComponent(searchWords)}&pageSize=1&apiKey=${API_KEY}`;
 
     try {
         const response = await axios.get(apiUrl);
         const article = response.data.articles[0]; // Get the first match
         
         if (!article || article.title === '[Removed]') {
-            return res.status(404).send(generateErrorHTML(`Article not found. NewsAPI could not locate the exact text: "${cleanTitle}"`));
+            return res.status(404).send(generateErrorHTML(`Article not found. NewsAPI could not locate text: "${searchWords}"`));
         }
         
         res.send(generateArticleHTML(article));
@@ -71,8 +81,9 @@ function generateIndexHTML(articles, title, searchQuery) {
 
     if (articles.length > 0) {
         articlesHTML = articles.map(article => {
-            // Create a clean URL slug for the article
-            const articleUrl = `/article/${encodeURIComponent(article.title)}`;
+            // Generate the dashed URL slug
+            const slug = createSlug(article.title);
+            const articleUrl = `/article/${slug}`;
             
             return `
             <div class="col-md-6 col-lg-4 mb-4">
