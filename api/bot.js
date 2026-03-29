@@ -1,8 +1,3 @@
-Here is the complete, fully updated Node.js file with the read-only strategy display cards integrated. 
-
-You can replace your entire existing file with this code.
-
-```javascript
 const express = require('express');
 const ccxt = require('ccxt');
 const mongoose = require('mongoose');
