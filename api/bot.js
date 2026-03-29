@@ -40,20 +40,26 @@ app.get('/', async (req, res) => {
 app.get('/article/:title', async (req, res) => {
     const articleTitle = req.params.title;
     
-    // Fetch the specific article by searching for its exact title
-    const apiUrl = `https://newsapi.org/v2/everything?qInTitle="${encodeURIComponent(articleTitle)}"&pageSize=1&apiKey=${API_KEY}`;
+    // FIX 1: Strip out the " - Publisher Name" from the title
+    // Example: "News Headline - AP News" becomes just "News Headline"
+    const cleanTitle = articleTitle.split(' - ')[0];
+    
+    // FIX 2: Removed the strict double-quotes from the query so NewsAPI 
+    // does a broader match instead of failing on exact punctuation.
+    const apiUrl = `https://newsapi.org/v2/everything?qInTitle=${encodeURIComponent(cleanTitle)}&pageSize=1&apiKey=${API_KEY}`;
 
     try {
         const response = await axios.get(apiUrl);
         const article = response.data.articles[0]; // Get the first match
         
         if (!article || article.title === '[Removed]') {
-            return res.status(404).send(generateErrorHTML('Article not found.'));
+            return res.status(404).send(generateErrorHTML(`Article not found. NewsAPI could not locate the exact text: "${cleanTitle}"`));
         }
         
         res.send(generateArticleHTML(article));
     } catch (error) {
-        res.status(500).send(generateErrorHTML('Error fetching the article details.'));
+        console.error("Article Fetch Error:", error.message);
+        res.status(500).send(generateErrorHTML('Error fetching the article details. NewsAPI might be blocking requests from Vercel.'));
     }
 });
 
@@ -220,6 +226,7 @@ function generateErrorHTML(message) {
     <html lang="en">
     <head>
         <title>Error - Daily News Blog</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
     </head>
     <body class="bg-light text-center pt-5">
