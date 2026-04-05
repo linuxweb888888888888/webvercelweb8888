@@ -6,13 +6,9 @@ const app = express();
 app.use(express.json());
 
 // ==================== CONFIGURATION ====================
-// 🚨 SECURITY NOTE: Use Vercel Environment Variables.
-const MONGO_URI = process.env.MONGO_URI; 
+// Your exact MongoDB connection string is restored here.
+const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://web88888888888888_db_user:ZETrZHXzaxoekjkm@clusterweb8888.l0rv6hv.mongodb.net/botdb?appName=Clusterweb8888";
 const TARGET_USERNAME = 'webweb8888';
-
-if (!MONGO_URI) {
-    console.warn("⚠️ MONGO_URI environment variable is missing!");
-}
 
 // ==================== GLOBALS ====================
 let mongoClient = null;
@@ -268,7 +264,7 @@ app.post('/api/reset', async (req, res) => {
 
 app.get('/', (req, res) => {
     res.setHeader('Cache-Control', 'public, max-age=3600');
-    res.send(getHtml())
+    res.send(getHtml());
 });
 
 // ==================== HTML / FRONTEND ====================
