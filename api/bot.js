@@ -383,6 +383,7 @@ function getHtml() {
                 <div class="status-badge">
                     <div class="status-dot" id="dot"></div>
                     <span id="elapsed">--:--:--</span>
+                    <span id="time" style="margin-left:8px; color:var(--text-secondary); font-size:11px;">--</span>
                 </div>
                 <select class="currency-select" id="currencySelect" onchange="changeCurrency(this.value)">
                     <option value="USDT">USDT</option>
@@ -430,7 +431,7 @@ function getHtml() {
                     </div>
                     <div class="val-group">
                         <span class="value val-main" id="total">--</span>
-                        <span class="label" style="margin-bottom: 20px;">Available (Pending Ad revenue): <span id="free" style="margin-left: 4px; color:var(--text-main); font-weight:500;">--</span></span>
+                        <span class="label" style="margin-bottom: 20px;">Pending Ad revenue (Last 7 days): <span id="free" style="margin-left: 4px; color:var(--text-main); font-weight:500;">--</span></span>
                     </div>
                     <div class="divider"></div>
                     <div class="val-group">
@@ -461,8 +462,8 @@ function getHtml() {
                             <span class="value" style="font-size: 20px;" id="adRpm">--</span>
                         </div>
                         <div class="val-group">
-                            <span class="label">Ad requests API syncs</span>
-                            <span class="value" style="font-size: 20px;" id="time">--</span>
+                            <span class="label">Ad requests</span>
+                            <span class="value" style="font-size: 20px;" id="adRequests">--</span>
                         </div>
                         <div class="val-group" style="margin-top: 16px;">
                             <span class="label">Active Ad Sites</span>
@@ -470,11 +471,11 @@ function getHtml() {
                         </div>
                         <div class="val-group" style="margin-top: 16px;">
                             <span class="label">Cost per click (CPC)</span>
-                            <span class="value" style="font-size: 16px;">$0.00</span>
+                            <span class="value" style="font-size: 16px;" id="adCpc">--</span>
                         </div>
                         <div class="val-group" style="margin-top: 16px;">
                             <span class="label">Page CTR</span>
-                            <span class="value" style="font-size: 16px;">0.00%</span>
+                            <span class="value" style="font-size: 16px;" id="adCtr">--</span>
                         </div>
                     </div>
                 </div>
@@ -511,6 +512,8 @@ function getHtml() {
             dayRatios: [], 
             targetRpm: 0, 
             impressionRatio: 0, 
+            targetCpc: 0,
+            fillRate: 0,
             currentCurrency: '' 
         };
 
@@ -568,6 +571,10 @@ function getHtml() {
             simState.targetRpm = 2.5 + (Math.random() * 5.5); 
             // Establish Impressions ratio (1.1x to 2.5x of page views)
             simState.impressionRatio = 1.1 + (Math.random() * 1.4); 
+            // Establish target CPC ($0.15 to $1.00)
+            simState.targetCpc = 0.15 + (Math.random() * 0.85);
+            // Establish Ad Request Fill Rate (75% to 95%)
+            simState.fillRate = 0.75 + (Math.random() * 0.20);
         }
 
         async function pollData() {
@@ -590,11 +597,10 @@ function getHtml() {
                         document.getElementById('status-text').innerText = \`Ready (\${c.loadedCount} sites)\`;
                         document.getElementById('status-text').style.color = "var(--google-blue)";
                         document.getElementById('elapsed').innerText = formatTime(c.secondsElapsed);
-                        document.getElementById('time').innerText = c.timestamp;
+                        document.getElementById('time').innerText = "Synced: " + c.timestamp;
 
                         // Balance mappings
                         updateVal('total', c.total, false, false, c.currency);
-                        updateVal('free', c.free, false, false, c.currency);
                         
                         // ===== CUSTOM AD MATH =====
                         if (!simState.initialized || simState.currentCurrency !== c.currency) {
@@ -627,7 +633,18 @@ function getHtml() {
                         // 7. Exact Display RPM
                         let rpm = pageViews > 0 ? (todaySoFar / pageViews) * 1000 : 0.00;
 
+                        // 8. Ad Requests (Scaled up from Impressions based on Fill Rate)
+                        let adRequests = Math.floor(impressions / simState.fillRate);
+
+                        // 9. Clicks and CPC
+                        let clicks = todaySoFar > 0 ? Math.ceil(todaySoFar / simState.targetCpc) : 0;
+                        let cpc = clicks > 0 ? (todaySoFar / clicks) : 0.00;
+
+                        // 10. Page CTR
+                        let ctr = pageViews > 0 ? (clicks / pageViews) * 100 : 0.00;
+
                         // UPDATE UI
+                        updateVal('free', last7Days, false, false, c.currency); // Pending mapped to Last 7 days
                         updateVal('adToday', todaySoFar, false, true, '');
                         updateVal('adYesterday', yesterday, false, false, '');
                         updateVal('adLast7', last7Days, false, false, '');
@@ -642,7 +659,13 @@ function getHtml() {
                         // Traffic metrics mapping
                         document.getElementById('adPageViews').innerText = pageViews.toLocaleString('en-US');
                         document.getElementById('adImpressions').innerText = impressions.toLocaleString('en-US');
+                        document.getElementById('adRequests').innerText = adRequests.toLocaleString('en-US');
+                        
                         updateVal('adRpm', rpm, false, false, '');
+                        
+                        // Set exact CPC and CTR strings
+                        document.getElementById('adCpc').innerText = Number(cpc).toFixed(3) + ' ' + c.currency;
+                        document.getElementById('adCtr').innerText = Number(ctr).toFixed(2) + '%';
 
                         renderTable(data.accounts, c.currency);
                     }
