@@ -6,82 +6,99 @@ const app = express();
 app.use(express.json());
 
 // ==================== CONFIGURATION ====================
-// 🚨 Ensure your DB password is correct here.
 const MONGO_URI = "mongodb+srv://web88888888888888_db_user:ZETrZHXzaxoekjkm@clusterweb8888.l0rv6hv.mongodb.net/botdb?appName=Clusterweb8888";
-const TARGET_USERNAME = 'webwebwebweb8888'; // Fixed to match your header
+const TARGET_USERNAME = 'webwebwebweb8888'; // Try changing this to 'webweb8888' if it fails
 const SUPPORTED_CURRENCIES = ['USDT', 'SHIB', 'XRP', 'BCH', 'ZAR'];
 
-// ==================== GLOBALS (Preserved across Vercel Warm Starts) ====================
 let mongoClient = null;
 let botDb = null;
 let dbCollection = null;
 let targetUserId = null;
-let targetIsPaper = false;
 let accounts = [];
-let activeBotSettings = {};
-let latestDbActions = [];
-let marketEvents = [];
+let dbDebugMsg = "Initializing...";
 
-let state = {
-    startTime: null,         
-    startBalance: 0,      
-    isInitialized: false,
-    currency: 'USDT'
-};
-
+let state = { startTime: null, startBalance: 0, isInitialized: false, currency: 'USDT' };
 const sharedExchange = new ccxt.huobi({ enableRateLimit: false, options: { defaultType: 'linear' } });
 
-// ==================== 1. DATABASE LOADER (ON-DEMAND) ====================
+// ==================== 1. DATABASE LOADER (DIAGNOSTIC MODE) ====================
 async function ensureDbLoaded() {
-    if (accounts.length > 0) return true; // Already loaded
+    if (accounts.length > 0) return true;
 
-    if (!mongoClient) {
-        mongoClient = new MongoClient(MONGO_URI);
-        await mongoClient.connect();
-        botDb = mongoClient.db("botdb");
-        dbCollection = mongoClient.db("HTX_Aggregator").collection("session_growth");
-    }
+    try {
+        if (!mongoClient) {
+            mongoClient = new MongoClient(MONGO_URI);
+            await mongoClient.connect();
+            botDb = mongoClient.db("botdb");
+            dbCollection = mongoClient.db("HTX_Aggregator").collection("session_growth");
+        }
 
-    const usersCol = botDb.collection("users");
-    const masterUser = await usersCol.findOne({ username: TARGET_USERNAME });
-    
-    if (masterUser) {
-        targetUserId = masterUser._id;
-        targetIsPaper = masterUser.isPaper || false;
+        const usersCol = botDb.collection("users");
         
+        // 1. Check Username
+        const masterUser = await usersCol.findOne({ username: TARGET_USERNAME });
+        if (!masterUser) {
+            // Let's check if the OTHER username exists instead
+            const altUser = await usersCol.findOne({ username: 'webweb8888' });
+            if (altUser) {
+                dbDebugMsg = `User '${TARGET_USERNAME}' not found, BUT 'webweb8888' exists! Change TARGET_USERNAME in the code.`;
+            } else {
+                dbDebugMsg = `User '${TARGET_USERNAME}' does not exist in the 'users' collection.`;
+            }
+            return false;
+        }
+
+        targetUserId = masterUser._id;
+        const targetIsPaper = masterUser.isPaper || false;
         const settingsColName = targetIsPaper ? "paper_settings" : "settings";
         const settingsCol = botDb.collection(settingsColName);
-        const masterSettings = await settingsCol.findOne({ userId: targetUserId });
         
-        if (masterSettings) {
-            activeBotSettings = masterSettings;
-            if (masterSettings.subAccounts) {
-                accounts = masterSettings.subAccounts
-                    .filter(sub => sub.apiKey && sub.secret)
-                    .map((sub, index) => ({
-                        id: index + 1,
-                        name: sub.name || `Profile ${index + 1}`,
-                        apiKey: sub.apiKey,
-                        secret: sub.secret,
-                        data: { total: 0, free: 0, used: 0, error: null }
-                    }));
-            }
+        // 2. Check Settings & Fix ObjectId vs String mismatch
+        let masterSettings = await settingsCol.findOne({ userId: targetUserId });
+        if (!masterSettings) {
+            // Try searching for userId as a String instead of an ObjectId
+            masterSettings = await settingsCol.findOne({ userId: targetUserId.toString() }); 
         }
+        
+        if (!masterSettings) {
+            dbDebugMsg = `Found user! But found NO settings in '${settingsColName}' for userId: ${targetUserId}`;
+            return false;
+        }
+
+        // 3. Check subAccounts array
+        if (!masterSettings.subAccounts || masterSettings.subAccounts.length === 0) {
+            dbDebugMsg = `Found settings! But the 'subAccounts' array is missing or empty.`;
+            return false;
+        }
+
+        // 4. Map the accounts
+        accounts = masterSettings.subAccounts
+            .filter(sub => sub.apiKey && sub.secret)
+            .map((sub, index) => ({
+                id: index + 1,
+                name: sub.name || `Profile ${index + 1}`,
+                apiKey: sub.apiKey,
+                secret: sub.secret,
+                data: { total: 0, free: 0, used: 0, error: null }
+            }));
+
+        if (accounts.length === 0) {
+            dbDebugMsg = `Found subAccounts! But none of them had BOTH 'apiKey' and 'secret' filled out.`;
+            return false;
+        }
+
+        return true;
+    } catch (err) {
+        dbDebugMsg = `MongoDB Crash: ` + err.message;
+        return false;
     }
-    return accounts.length > 0;
 }
 
-// ==================== 2. HTX DATA FETCHER (ON-DEMAND) ====================
+// ==================== 2. HTX DATA FETCHER ====================
 async function fetchAccountData(acc, currency) {
     sharedExchange.apiKey = acc.apiKey;
     sharedExchange.secret = acc.secret;
-    
     try {
-        let totalEquity = 0;
-        let freeCurrency = 0;
-        let balSuccess = false;
-
-        // Try to fetch balance
+        let totalEquity = 0; let freeCurrency = 0; let balSuccess = false;
         try {
             const bal = await sharedExchange.fetchBalance({ type: 'swap', marginMode: 'cross' });
             if (bal?.total?.[currency] !== undefined) {
@@ -90,32 +107,73 @@ async function fetchAccountData(acc, currency) {
                 balSuccess = true;
             }
         } catch(e) {}
-
         if (!balSuccess) throw new Error("Balance Fetch Failed");
 
-        // Try to fetch positions for unrealized PNL
         let totalUnrealizedPnl = 0;
         try {
             const ccxtPos = await sharedExchange.fetchPositions(undefined, { marginMode: 'cross' });
-            if (ccxtPos) {
-                ccxtPos.forEach(p => { totalUnrealizedPnl += parseFloat(p.unrealizedPnl || 0); });
-            }
+            if (ccxtPos) ccxtPos.forEach(p => { totalUnrealizedPnl += parseFloat(p.unrealizedPnl || 0); });
         } catch(e) {}
 
-        const staticWalletBalance = totalEquity - totalUnrealizedPnl;
-
-        acc.data = {
-            total: isNaN(staticWalletBalance) ? 0 : staticWalletBalance,
-            free: isNaN(freeCurrency) ? 0 : freeCurrency,
-            used: isNaN(totalEquity - freeCurrency) ? 0 : (totalEquity - freeCurrency),
-            error: null
-        };
+        acc.data = { total: totalEquity - totalUnrealizedPnl, free: freeCurrency, used: totalEquity - freeCurrency, error: null };
         return acc;
     } catch (err) {
         acc.data.error = "API Error";
         return acc;
     }
 }
+
+// ==================== 3. VERCEL API ENDPOINTS ====================
+app.get('/api/data', async (req, res) => {
+    const requestedCurrency = req.query.currency || 'USDT';
+    if (requestedCurrency !== state.currency) { state.currency = requestedCurrency; state.isInitialized = false; }
+
+    try {
+        const hasAccounts = await ensureDbLoaded();
+        
+        // 🚨 THIS WILL NOW PRINT THE EXACT ERROR REASON TO YOUR SCREEN
+        if (!hasAccounts) {
+            return res.json({ error: "DB Error: " + dbDebugMsg, combined: { isReady: false } });
+        }
+
+        await Promise.all(accounts.map(acc => fetchAccountData(acc, state.currency)));
+
+        let grandTotal = 0, grandFree = 0, grandUsed = 0, loadedCount = 0;
+        accounts.forEach(acc => {
+            if (!acc.data.error) { grandTotal += acc.data.total; grandFree += acc.data.free; grandUsed += acc.data.used; loadedCount++; }
+        });
+
+        if (!state.isInitialized && loadedCount > 0 && loadedCount === accounts.length) {
+            let doc = await dbCollection.findOne({ currency: state.currency });
+            if (doc && doc.startTime && doc.startBalance !== undefined) {
+                state.startTime = doc.startTime; state.startBalance = doc.startBalance;
+            } else {
+                state.startTime = Date.now(); state.startBalance = grandTotal;
+                await dbCollection.updateOne({ currency: state.currency }, { $set: { startTime: state.startTime, startBalance: state.startBalance } }, { upsert: true });
+            }
+            state.isInitialized = true;
+        }
+
+        const now = Date.now();
+        const secondsElapsed = state.isInitialized ? Math.max(1, (now - state.startTime) / 1000) : 0;
+        const growth = state.isInitialized ? (grandTotal - state.startBalance) : 0;
+        const avgGrowthPerSec = state.isInitialized ? (growth / secondsElapsed) : 0;
+
+        res.json({
+            combined: {
+                currency: state.currency, isReady: state.isInitialized, loadedCount, totalCount: accounts.length,
+                total: grandTotal, free: grandFree, used: grandUsed, startBalance: state.startBalance,
+                secondsElapsed, growth, growthPct: state.startBalance > 0 ? (growth / state.startBalance) * 100 : 0,
+                avgGrowthPerSec, avgGrowthPctPerSec: state.startBalance > 0 ? (avgGrowthPerSec / state.startBalance) * 100 : 0,
+                growthPerHour: avgGrowthPerSec * 3600, growthPerDay: avgGrowthPerSec * 86400, timestamp: new Date().toLocaleTimeString()
+            },
+            accounts: accounts.map(a => ({ name: a.name, ...a.data, isLoaded: !a.data.error }))
+        });
+
+    } catch (err) {
+        res.status(500).json({ error: "Server error", combined: { isReady: false } });
+    }
+});
 
 // ==================== 3. VERCEL API ENDPOINTS ====================
 
