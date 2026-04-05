@@ -6,6 +6,7 @@ const app = express();
 app.use(express.json());
 
 // ==================== CONFIGURATION ====================
+// 🚨 SECURITY NOTE: In Vercel, put your Mongo string in Settings -> Environment Variables as MONGO_URI
 const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://web88888888888888_db_user:ZETrZHXzaxoekjkm@clusterweb8888.l0rv6hv.mongodb.net/botdb?appName=Clusterweb8888";
 const TARGET_USERNAME = 'webweb8888';
 
@@ -80,9 +81,14 @@ async function ensureDbLoaded() {
 
 // ==================== 2. HTX DATA FETCHER ====================
 async function fetchAccountData(acc, currency) {
+    let totalEquity = 0; 
+    let freeCurrency = 0; 
+    let staticWalletBalance = 0;
+    let balSuccess = false;
+    let needsPositionFetch = true;
+
     try {
-        let totalEquity = 0; let freeCurrency = 0; let balSuccess = false;
-        
+        // STEP 1: Try the standard CCXT fetchBalance (works for normal non-unified accounts)
         try {
             const bal = await acc.exchange.fetchBalance({ type: 'swap', marginMode: 'cross' });
             if (bal?.total?.[currency] !== undefined) {
@@ -90,30 +96,63 @@ async function fetchAccountData(acc, currency) {
                 freeCurrency = parseFloat(bal.free[currency] || 0);
                 balSuccess = true;
             }
-        } catch(e) { throw e; }
-        
-        if (!balSuccess) throw new Error(`Balance Fetch Failed - ${currency} missing from response.`);
-
-        let totalUnrealizedPnl = 0;
-        try {
-            const ccxtPos = await acc.exchange.fetchPositions(undefined, { marginMode: 'cross' });
-            if (ccxtPos) {
-                ccxtPos.forEach(p => { totalUnrealizedPnl += parseFloat(p.unrealizedPnl || 0); });
-            }
         } catch(e) {
-            // Non-fatal, keep going but log internally
+            // STEP 2: If HTX rejects it because the account is Unified (Error 4002)
+            if (e.message.includes('v3/unified_account_info') || e.message.includes('4002')) {
+                try {
+                    // Use CCXT's implicit method to call the exact endpoint HTX is asking for
+                    const unifiedRes = await acc.exchange.contractPrivateGetLinearSwapApiV3UnifiedAccountInfo();
+                    
+                    if (unifiedRes && unifiedRes.data) {
+                        // Find the requested currency in the unified data array
+                        const assetData = unifiedRes.data.find(d => d.margin_asset.toUpperCase() === currency.toUpperCase());
+                        
+                        if (assetData) {
+                            totalEquity = parseFloat(assetData.margin_balance || 0); // Wallet + PnL
+                            freeCurrency = parseFloat(assetData.free || 0);          // Available to trade
+                            staticWalletBalance = parseFloat(assetData.margin_static || 0); // Wallet Balance without PnL
+                            
+                            balSuccess = true;
+                            needsPositionFetch = false; // V3 API gives us static margin natively! No need to fetch positions.
+                        } else {
+                            throw new Error(`Asset ${currency} not found in Unified Account.`);
+                        }
+                    } else {
+                        throw new Error("Invalid response from V3 Unified API.");
+                    }
+                } catch (v3Err) {
+                    throw new Error(`Unified API Error: ${v3Err.message}`);
+                }
+            } else {
+                // If it's a different error (like invalid API keys), throw it normally
+                throw e; 
+            }
+        }
+        
+        if (!balSuccess) throw new Error(`Balance Fetch Failed - ${currency} missing.`);
+
+        // STEP 3: If we used the old API, we must manually calculate unrealized PnL to find the static wallet balance
+        if (needsPositionFetch) {
+            let totalUnrealizedPnl = 0;
+            try {
+                const ccxtPos = await acc.exchange.fetchPositions(undefined, { marginMode: 'cross' });
+                if (ccxtPos) {
+                    ccxtPos.forEach(p => { totalUnrealizedPnl += parseFloat(p.unrealizedPnl || 0); });
+                }
+            } catch(e) { /* Ignore position errors */ }
+            staticWalletBalance = totalEquity - totalUnrealizedPnl;
         }
 
-        const staticWalletBalance = totalEquity - totalUnrealizedPnl;
-
+        // STEP 4: Store Data
         acc.data = {
             total: isNaN(staticWalletBalance) ? 0 : staticWalletBalance,
             free: isNaN(freeCurrency) ? 0 : freeCurrency,
             used: isNaN(totalEquity - freeCurrency) ? 0 : (totalEquity - freeCurrency),
             error: null
         };
+
     } catch (err) {
-        // FULL ERROR DISPLAY - Removed the 40 character truncation
+        // FULL ERROR EXPOSURE
         acc.data.error = err.message || err.toString();
     }
 }
@@ -204,7 +243,6 @@ app.get('/api/data', async (req, res) => {
         res.json(payload);
 
     } catch (err) {
-        // FULL SERVER ERROR EXPOSURE
         res.status(500).json({ 
             error: `Server Crash: ${err.message}`, 
             stack: err.stack,
@@ -272,7 +310,7 @@ function getHtml() {
         th { background: #f9fafb; padding: 16px; text-align: left; border-bottom: 1px solid #e5e7eb; font-size: 12px; text-transform: uppercase; }
         td { padding: 16px; border-bottom: 1px solid #f3f4f6; }
         td.num-col { font-family: 'Roboto Mono'; font-size: 13px; text-align: right;}
-        td.status-col { max-width: 300px; word-wrap: break-word; white-space: normal; text-align: right; } /* Added text wrapping for long errors */
+        td.status-col { max-width: 300px; word-wrap: break-word; white-space: normal; text-align: right; }
         .footer { text-align: center; margin-top: 40px; padding-bottom:20px; color: var(--text-light); font-size: 12px; }
         .dot { height: 8px; width: 8px; background-color: #bbb; border-radius: 50%; display: inline-block; margin-right: 6px; }
         .dot.live { background-color: var(--green); box-shadow: 0 0 4px var(--green); }
@@ -410,7 +448,6 @@ function getHtml() {
             const data = await res.json();
             
             if (data.error) {
-                // EXPOSE API/DATABASE ERRORS ON SCREEN
                 document.getElementById('status-text').innerText = "ERROR: " + data.error;
                 document.getElementById('status-text').style.color = "var(--red)";
             } else {
@@ -448,7 +485,7 @@ function getHtml() {
             document.getElementById('status-text').innerText = "Network Error: " + err.message;
             document.getElementById('status-text').style.color = "var(--red)";
         } finally {
-            setTimeout(pollData, 2000);
+            setTimeout(pollData, 2000); // 2 second pause before fetching again
         }
     }
 
@@ -458,7 +495,6 @@ function getHtml() {
         accounts.forEach(acc => {
             const tr = document.createElement('tr');
             
-            // FULL CCXT/HTX ERROR DISPLAYED IN TABLE
             let statusHtml = acc.isLoaded 
                 ? '<span style="color:var(--green); font-weight:700;">OK</span>' 
                 : \`<span style="color:var(--red); font-weight:700; font-size:11px;">\${acc.error}</span>\`;
