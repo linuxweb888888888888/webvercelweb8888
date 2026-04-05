@@ -1,5 +1,3 @@
-//web8888
-
 const express = require('express');
 const { MongoClient } = require('mongodb');
 const ccxt = require('ccxt');
@@ -10,7 +8,7 @@ app.use(express.json());
 // ==================== CONFIGURATION ====================
 // 🚨 Ensure your DB password is correct here.
 const MONGO_URI = "mongodb+srv://web88888888888888_db_user:ZETrZHXzaxoekjkm@clusterweb8888.l0rv6hv.mongodb.net/botdb?appName=Clusterweb8888";
-const TARGET_USERNAME = 'webweb8888'; 
+const TARGET_USERNAME = 'webweb8888';
 const SUPPORTED_CURRENCIES = ['USDT', 'SHIB', 'XRP', 'BCH', 'ZAR'];
 
 // ==================== GLOBALS (Preserved across Vercel Warm Starts) ====================
@@ -68,7 +66,7 @@ async function ensureDbLoaded() {
             return false;
         }
 
-        // 🚨 FIX: Create a unique CCXT instance for EVERY account so they don't overwrite each other
+        // Create a unique CCXT instance for EVERY account so they don't overwrite each other
         accounts = masterSettings.subAccounts
             .filter(sub => sub.apiKey && sub.secret)
             .map((sub, index) => ({
@@ -108,13 +106,15 @@ async function fetchAccountData(acc, currency) {
                 freeCurrency = parseFloat(bal.free[currency] || 0);
                 balSuccess = true;
             }
-        } catch(e) {}
+        } catch(e) {
+            // Throw the specific CCXT error so we can catch it below
+            throw e; 
+        }
         
-        if (!balSuccess) throw new Error("Balance Fetch Failed");
+        if (!balSuccess) throw new Error("Balance Fetch Failed - Empty Data");
 
         let totalUnrealizedPnl = 0;
         try {
-            // Use the specific account's exchange instance
             const ccxtPos = await acc.exchange.fetchPositions(undefined, { marginMode: 'cross' });
             if (ccxtPos) {
                 ccxtPos.forEach(p => { totalUnrealizedPnl += parseFloat(p.unrealizedPnl || 0); });
@@ -131,7 +131,14 @@ async function fetchAccountData(acc, currency) {
         };
         return acc;
     } catch (err) {
-        acc.data.error = "API Error";
+        // 🚨 FIX: Extract the exact HTX error message and send it to the UI
+        let errMsg = err.message || "API Error";
+        errMsg = errMsg.replace('huobi ', ''); // Clean up the ccxt prefix
+        
+        // Truncate if it's too long so it doesn't break the HTML table
+        if(errMsg.length > 35) errMsg = errMsg.substring(0, 35) + "...";
+        
+        acc.data.error = errMsg;
         return acc;
     }
 }
@@ -252,7 +259,7 @@ app.post('/api/reset', async (req, res) => {
 // UI Route
 app.get('/', (req, res) => res.send(getHtml()));
 
-// ==================== HTML / FRONTEND (Rewritten for HTTP Fetch) ====================
+// ==================== HTML / FRONTEND ====================
 function getHtml() {
     return `
 <!DOCTYPE html>
@@ -262,7 +269,6 @@ function getHtml() {
     <title>HTX Master Aggregator</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
-    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet" />
     <style>
         :root { --primary: #3f51b5; --bg: #f0f2f5; --card-bg: #ffffff; --text-main: #1f2937; --text-light: #6b7280; --green: #10b981; --red: #ef4444; --shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
         body { background: var(--bg); color: var(--text-main); font-family: 'Roboto', sans-serif; margin: 0; padding: 0; }
@@ -426,7 +432,6 @@ function getHtml() {
         if(colorize) el.className = 'val ' + colorClass(val);
     };
 
-    // VERCEL SPECIFIC: Polling API instead of WebSockets
     async function pollData() {
         try {
             document.getElementById('dot').classList.remove('live');
@@ -477,7 +482,12 @@ function getHtml() {
         tbody.innerHTML = '';
         accounts.forEach(acc => {
             const tr = document.createElement('tr');
-            let statusHtml = acc.isLoaded ? '<span style="color:var(--green); font-weight:700;">OK</span>' : '<span style="color:var(--red); font-weight:700;">Error</span>';
+            
+            // 🚨 Replaced basic error text with the actual CCXT detailed error response
+            let statusHtml = acc.isLoaded 
+                ? '<span style="color:var(--green); font-weight:700;">OK</span>' 
+                : \`<span style="color:var(--red); font-weight:700; font-size:11px;">\${acc.error}</span>\`;
+                
             tr.innerHTML = \`
                 <td>\${acc.name}</td>
                 <td class="num-col">\${fmt(acc.total)} \${currency}</td>
@@ -488,7 +498,6 @@ function getHtml() {
         });
     }
 
-    // Call API every 2 seconds
     pollData();
     setInterval(pollData, 2000);
 </script>
