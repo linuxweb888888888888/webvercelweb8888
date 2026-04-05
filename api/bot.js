@@ -277,240 +277,326 @@ function getHtml() {
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <title>HTX Master Aggregator</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <title>Google AdSense</title>
+    <link href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&family=Roboto:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@24,400,0,0" rel="stylesheet" />
     <style>
-        :root { --primary: #3f51b5; --bg: #f0f2f5; --card-bg: #ffffff; --text-main: #1f2937; --text-light: #6b7280; --green: #10b981; --red: #ef4444; --shadow: 0 4px 6px -1px rgba(0,0,0,0.05); }
-        body { background: var(--bg); color: var(--text-main); font-family: 'Roboto', sans-serif; margin: 0; padding: 0; }
-        .top-nav { background: #ffffff; padding: 0 20px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #e5e7eb; box-shadow: 0 1px 3px rgba(0,0,0,0.05); height: 60px; margin-bottom: 25px; }
-        .nav-logo { font-size: 18px; font-weight: 700; color: var(--primary); }
-        .nav-links { display: flex; gap: 20px; }
-        .nav-link { text-decoration: none; color: var(--text-light); font-weight: 500; font-size: 14px; padding: 10px 0; border-bottom: 2px solid transparent; cursor: pointer; }
-        .nav-link.active { color: var(--primary); border-bottom: 2px solid var(--primary); }
-        .container { max-width: 900px; margin: 0 auto; padding: 0 20px; }
-        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 25px; }
-        h1 { font-size: 22px; font-weight: 700; margin: 0; }
-        .subtitle { font-size: 13px; color: var(--text-light); margin-top: 4px; }
-        .controls { display: flex; align-items: center; gap: 10px; }
-        .currency-select { background: #ffffff; border: 1px solid #d1d5db; padding: 6px 10px; border-radius: 6px; font-size: 13px; font-weight: 600; cursor: pointer; outline: none; }
-        .timer-badge { background: #e5e7eb; padding: 6px 14px; border-radius: 20px; font-size: 13px; font-family: 'Roboto Mono'; }
-        .btn-reset { background: white; border: 1px solid #d1d5db; padding: 6px 12px; border-radius: 6px; cursor: pointer; font-size: 11px; font-weight: 600; }
-        .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px; }
-        .card { background: var(--card-bg); border-radius: 12px; box-shadow: var(--shadow); padding: 24px; }
-        .card-title { font-size: 12px; text-transform: uppercase; color: var(--text-light); margin-bottom: 12px; font-weight: 600; }
-        .big-val { font-family: 'Roboto Mono'; font-size: 26px; font-weight: 700; }
-        .sub-val { font-family: 'Roboto Mono'; font-size: 13px; color: var(--text-light); margin-top: 6px; }
-        .row { display: flex; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid #f3f4f6; font-size: 14px; }
-        .row:last-child { border-bottom: none; }
-        .val { font-weight: 500; font-family: 'Roboto Mono'; }
-        .green-txt { color: var(--green) !important; } .red-txt { color: var(--red) !important; }
-        .table-card { background: var(--card-bg); border-radius: 12px; box-shadow: var(--shadow); overflow: hidden; margin-top: 20px;}
-        table { width: 100%; border-collapse: collapse; font-size: 14px; }
-        th { background: #f9fafb; padding: 16px; text-align: left; border-bottom: 1px solid #e5e7eb; font-size: 12px; text-transform: uppercase; }
-        td { padding: 16px; border-bottom: 1px solid #f3f4f6; }
-        td.num-col { font-family: 'Roboto Mono'; font-size: 13px; text-align: right;}
-        td.status-col { max-width: 300px; word-wrap: break-word; white-space: normal; text-align: right; }
-        .footer { text-align: center; margin-top: 40px; padding-bottom:20px; color: var(--text-light); font-size: 12px; }
-        .dot { height: 8px; width: 8px; background-color: #bbb; border-radius: 50%; display: inline-block; margin-right: 6px; }
-        .dot.live { background-color: var(--green); box-shadow: 0 0 4px var(--green); }
+        /* Material Design AdSense CSS */
+        :root {
+            --google-blue: #1a73e8;
+            --text-main: #202124;
+            --text-secondary: #5f6368;
+            --border-color: #dadce0;
+            --bg-color: #f8f9fa;
+            --card-bg: #ffffff;
+            --green: #1e8e3e;
+            --red: #d93025;
+        }
+        body { font-family: 'Roboto', arial, sans-serif; background: var(--bg-color); color: var(--text-main); margin: 0; display: flex; height: 100vh; overflow: hidden;}
+        h1, h2, h3, .brand { font-family: 'Google Sans', sans-serif; }
+        
+        /* Topbar */
+        .topbar { position: fixed; top: 0; left: 0; right: 0; height: 64px; background: #fff; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; padding: 0 16px; z-index: 100; }
+        .menu-icon { color: var(--text-secondary); cursor: pointer; margin-right: 16px; }
+        .logo-text { font-family: 'Google Sans', sans-serif; font-size: 22px; color: #5f6368; display: flex; align-items:center; gap: 4px; }
+        .logo-text span { color: #202124; font-weight: 500; }
+        
+        /* Layout */
+        .sidebar { width: 256px; background: #fff; border-right: 1px solid var(--border-color); padding-top: 80px; height: 100%; display: flex; flex-direction: column; }
+        .nav-item { display: flex; align-items: center; padding: 12px 24px; color: var(--text-secondary); text-decoration: none; font-weight: 500; border-radius: 0 24px 24px 0; margin-right: 16px; cursor: pointer; gap: 16px; }
+        .nav-item:hover { background: #f1f3f4; }
+        .nav-item.active { background: #e8f0fe; color: var(--google-blue); }
+        .nav-item.active .material-symbols-outlined { color: var(--google-blue); }
+        
+        .main-content { flex: 1; padding: 88px 24px 24px 24px; overflow-y: auto; background: var(--bg-color); }
+        .header-bar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+        .page-title { font-size: 24px; font-weight: 400; color: var(--text-main); margin: 0; }
+        
+        .controls { display: flex; gap: 12px; align-items: center; }
+        select.currency-select, button.btn-reset { font-family: 'Google Sans'; background: #fff; border: 1px solid var(--border-color); padding: 8px 16px; border-radius: 4px; font-size: 14px; color: var(--text-main); cursor: pointer; outline: none; font-weight: 500;}
+        select.currency-select:hover, button.btn-reset:hover { background: #f8f9fa; }
+        .status-badge { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--text-secondary); background: #fff; padding: 6px 12px; border-radius: 16px; border: 1px solid var(--border-color); }
+        .status-dot { width: 8px; height: 8px; border-radius: 50%; background: #ccc; }
+        .status-dot.live { background: var(--green); }
+        
+        /* Cards */
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 24px; margin-bottom: 24px; }
+        .card { background: var(--card-bg); border: 1px solid var(--border-color); border-radius: 8px; padding: 20px; box-shadow: none; }
+        
+        .card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 20px; }
+        .card-title { font-family: 'Google Sans'; font-size: 16px; font-weight: 500; color: var(--text-main); margin: 0; }
+        .card-icon { color: var(--text-secondary); cursor: pointer; }
+        
+        .val-main { font-family: 'Google Sans'; font-size: 36px; font-weight: 400; color: var(--text-main); margin-bottom: 4px; }
+        
+        .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 20px; }
+        .val-group { display: flex; flex-direction: column; }
+        .val-group .label { font-size: 13px; color: var(--text-secondary); margin-bottom: 4px; }
+        .val-group .value { font-family: 'Google Sans'; font-size: 24px; font-weight: 400; color: var(--text-main); }
+        .val-group .trend { font-size: 12px; margin-top: 4px; }
+        .green { color: var(--green); } .red { color: var(--red); }
+
+        .divider { height: 1px; background: var(--border-color); margin: 20px 0; }
+
+        /* Table for Sites */
+        .sites-table { width: 100%; border-collapse: collapse; }
+        .sites-table th { text-align: left; padding: 12px 8px; border-bottom: 1px solid var(--border-color); font-weight: 500; color: var(--text-secondary); font-size: 13px; }
+        .sites-table td { padding: 12px 8px; border-bottom: 1px solid var(--border-color); font-size: 14px; color: var(--text-main); }
+        .site-name { display: flex; align-items: center; gap: 8px; color: var(--google-blue); font-weight: 500; }
     </style>
 </head>
 <body>
-
-<div class="top-nav">
-    <div class="nav-logo">⚡ HTX Master Aggregator</div>
-    <div class="nav-links">
-        <a class="nav-link active" id="tab-dashboard" onclick="switchTab('dashboard')">Overview Dashboard</a>
-        <a class="nav-link" id="tab-accounts" onclick="switchTab('accounts')">Accounts</a>
-    </div>
-</div>
-
-<div class="container">
-    <div class="header">
-        <div>
-            <h1 id="page-title">Portfolio Overview</h1>
-            <div class="subtitle" id="status-text" style="color:var(--red); font-weight:bold;">Connecting to Vercel API...</div>
-        </div>
-        <div class="controls">
-            <select class="currency-select" id="currencySelect" onchange="changeCurrency(this.value)">
-                <option value="USDT">USDT</option>
-                <option value="SHIB">SHIB</option>
-                <option value="XRP">XRP</option>
-                <option value="BCH">BCH</option>
-            </select>
-            <div class="timer-badge" id="elapsed">--:--:--</div>
-            <button class="btn-reset" onclick="resetSession()">Reset Stats</button>
+    <div class="topbar">
+        <span class="material-symbols-outlined menu-icon">menu</span>
+        <div class="logo-text">
+            <span class="material-symbols-outlined" style="color: #fbbc04; font-size: 32px;">leaderboard</span>
+            Google <span>AdSense</span>
         </div>
     </div>
-
-    <div id="page-dashboard">
-        <div class="grid">
-            <div class="card">
-                <div class="card-title">Live Wallet</div>
-                <div class="big-val" id="total">Loading...</div>
-                <div class="sub-val">Available: <span id="free">--</span></div>
-            </div>
-            <div class="card">
-                <div class="card-title">Realized Session Growth</div>
-                <div class="big-val" id="growth">--</div>
-                <div class="sub-val" id="growthPct">--%</div>
+    
+    <div class="sidebar">
+        <a class="nav-item active" id="nav-home" onclick="switchTab('dashboard')">
+            <span class="material-symbols-outlined">home</span> Home
+        </a>
+        <a class="nav-item" id="nav-sites" onclick="switchTab('accounts')">
+            <span class="material-symbols-outlined">web</span> Sites
+        </a>
+        <a class="nav-item" onclick="resetSession()">
+            <span class="material-symbols-outlined">refresh</span> Reset stats
+        </a>
+    </div>
+    
+    <div class="main-content">
+        <div class="header-bar">
+            <h2 class="page-title" id="page-title">Home</h2>
+            <div class="controls">
+                <div class="status-badge">
+                    <div class="status-dot" id="dot"></div>
+                    <span id="elapsed">--:--:--</span>
+                </div>
+                <select class="currency-select" id="currencySelect" onchange="changeCurrency(this.value)">
+                    <option value="USDT">USDT</option>
+                    <option value="SHIB">SHIB</option>
+                    <option value="XRP">XRP</option>
+                    <option value="BCH">BCH</option>
+                </select>
             </div>
         </div>
 
-        <div class="grid">
-            <div class="card">
-                <div class="card-title">Realized Projections (Avg)</div>
-                <div class="row"><span>Est. Second</span> <span class="val" id="projSec">--</span></div>
-                <div class="row"><span>Est. Hour</span> <span class="val" id="projHour">--</span></div>
-                <div class="row"><span>Est. Day</span> <span class="val" id="projDay">--</span></div>
+        <div id="page-dashboard">
+            <div class="grid">
+                <!-- Estimated Earnings Card -->
+                <div class="card" style="grid-column: span 2;">
+                    <div class="card-header">
+                        <h3 class="card-title">Estimated earnings</h3>
+                        <span class="material-symbols-outlined card-icon">more_vert</span>
+                    </div>
+                    <div class="two-col">
+                        <div class="val-group">
+                            <span class="label">Today so far</span>
+                            <span class="value" id="growth">--</span>
+                            <span class="trend" id="growthPct">--</span>
+                        </div>
+                        <div class="val-group">
+                            <span class="label">Yesterday (Per Hour Est)</span>
+                            <span class="value" id="projHour">--</span>
+                        </div>
+                        <div class="val-group">
+                            <span class="label">Last 7 days (Per Sec Est)</span>
+                            <span class="value" id="projSec">--</span>
+                        </div>
+                        <div class="val-group">
+                            <span class="label">This month (Per Day Est)</span>
+                            <span class="value" id="projDay">--</span>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Balance Card -->
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">Balance</h3>
+                        <span class="material-symbols-outlined card-icon">more_vert</span>
+                    </div>
+                    <div class="val-group">
+                        <span class="value val-main" id="total">--</span>
+                        <span class="label" style="margin-bottom: 20px;">Available: <span id="free">--</span></span>
+                    </div>
+                    <div class="divider"></div>
+                    <div class="val-group">
+                        <span class="label">Last payment (Starting Balance)</span>
+                        <span class="value" style="font-size: 16px;" id="startWallet">--</span>
+                    </div>
+                </div>
             </div>
+
+            <div class="grid">
+                <!-- Performance Card -->
+                <div class="card" style="grid-column: span 3;">
+                    <div class="card-header">
+                        <h3 class="card-title">Performance</h3>
+                        <span class="material-symbols-outlined card-icon">more_vert</span>
+                    </div>
+                    <div class="two-col" style="grid-template-columns: repeat(4, 1fr);">
+                        <div class="val-group">
+                            <span class="label">Page views (Used Margin)</span>
+                            <span class="value" style="font-size: 20px;" id="used">--</span>
+                        </div>
+                        <div class="val-group">
+                            <span class="label">Page RPM (Growth/Sec)</span>
+                            <span class="value" style="font-size: 20px;" id="perfRpm">--</span>
+                        </div>
+                        <div class="val-group">
+                            <span class="label">Impressions (API Synced)</span>
+                            <span class="value" style="font-size: 20px;" id="time">--</span>
+                        </div>
+                        <div class="val-group">
+                            <span class="label">Active Sites</span>
+                            <span class="value" style="font-size: 20px;" id="status-text">Connecting...</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Sites Page -->
+        <div id="page-accounts" style="display: none;">
             <div class="card">
-                <div class="card-title">Session Balances & Margin</div>
-                <div class="row"><span>Starting Wallet</span> <span class="val" id="startWallet">--</span></div>
-                <div class="row"><span>Current Wallet</span> <span class="val" id="currentWallet">--</span></div>
-                <div class="row"><span>Used Margin</span> <span class="val" id="used">--</span></div>
+                <div class="card-header">
+                    <h3 class="card-title">Sites</h3>
+                </div>
+                <table class="sites-table">
+                    <thead>
+                        <tr>
+                            <th>Site (Account)</th>
+                            <th>Status</th>
+                            <th style="text-align: right;">Page views (Wallet Balance)</th>
+                            <th style="text-align: right;">Estimated earnings (Free)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="accBody"></tbody>
+                </table>
             </div>
         </div>
     </div>
 
-    <div id="page-accounts" style="display: none;">
-        <div class="table-card">
-            <table id="accTable">
-                <thead>
-                    <tr>
-                        <th>Account Profile</th>
-                        <th style="text-align:right">Wallet Balance</th>
-                        <th style="text-align:right">Available Free</th>
-                        <th style="text-align:right">Status</th>
-                    </tr>
-                </thead>
-                <tbody id="accBody"></tbody>
-            </table>
-        </div>
-    </div>
+    <script>
+        let currentCurrency = 'USDT';
 
-    <div class="footer">
-        <span class="dot" id="dot"></span> API Last Synced: <span id="time">--</span>
-    </div>
-</div>
-
-<script>
-    let currentCurrency = 'USDT';
-
-    function switchTab(tabName) {
-        document.getElementById('page-dashboard').style.display = tabName === 'dashboard' ? 'block' : 'none';
-        document.getElementById('page-accounts').style.display = tabName === 'accounts' ? 'block' : 'none';
-        document.getElementById('tab-dashboard').classList.toggle('active', tabName === 'dashboard');
-        document.getElementById('tab-accounts').classList.toggle('active', tabName === 'accounts');
-        document.getElementById('page-title').innerText = tabName === 'dashboard' ? "Portfolio Overview" : "Accounts & API";
-    }
-
-    async function resetSession() { 
-        if(confirm('Reset stats to current Wallet Balance?')) {
-            await fetch('/api/reset', { method: 'POST' });
+        function switchTab(tabName) {
+            document.getElementById('page-dashboard').style.display = tabName === 'dashboard' ? 'block' : 'none';
+            document.getElementById('page-accounts').style.display = tabName === 'accounts' ? 'block' : 'none';
+            document.getElementById('nav-home').classList.toggle('active', tabName === 'dashboard');
+            document.getElementById('nav-sites').classList.toggle('active', tabName === 'accounts');
+            document.getElementById('page-title').innerText = tabName === 'dashboard' ? "Home" : "Sites";
         }
-    }
-    
-    function changeCurrency(newCoin) {
-        currentCurrency = newCoin;
-        document.getElementById('status-text').innerText = 'Switching currencies...';
-        document.getElementById('status-text').style.color = 'var(--text-light)';
-        document.getElementById('total').innerText = 'Loading...';
-    }
-    
-    const fmt = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 6, maximumFractionDigits: 10 });
-    const fmtPct = (n) => (n > 0 ? '+' : '') + Number(n).toFixed(6) + '%';
-    const colorClass = (n) => n > 0 ? 'green-txt' : (n < 0 ? 'red-txt' : '');
-    
-    const formatTime = (seconds) => {
-        const h = Math.floor(seconds / 3600).toString().padStart(2,'0');
-        const m = Math.floor((seconds % 3600) / 60).toString().padStart(2,'0');
-        const s = Math.floor(seconds % 60).toString().padStart(2,'0');
-        return \`\${h}:\${m}:\${s}\`;
-    };
 
-    const updateVal = (id, val, isPct=false, colorize=false, currency='') => {
-        const el = document.getElementById(id);
-        if(!el) return;
-        let txt = isPct ? fmtPct(val) : fmt(val);
-        if(colorize && val > 0 && !isPct) txt = '+' + txt;
-        if(currency && !isPct) txt = txt + ' ' + currency;
-        
-        el.innerText = txt;
-        if(colorize) el.className = 'val ' + colorClass(val);
-    };
-
-    async function pollData() {
-        try {
-            document.getElementById('dot').classList.remove('live');
-            const res = await fetch('/api/data?currency=' + currentCurrency);
-            const data = await res.json();
-            
-            if (data.error) {
-                document.getElementById('status-text').innerText = "ERROR: " + data.error;
-                document.getElementById('status-text').style.color = "var(--red)";
-            } else {
-                document.getElementById('dot').classList.add('live');
-                const c = data.combined;
-                
-                if (!c.isReady) {
-                    document.getElementById('status-text').innerText = \`Fetching \${c.currency} Data via Vercel... (\${c.loadedCount}/\${c.totalCount})\`;
-                    document.getElementById('status-text').style.color = "var(--text-light)";
-                    renderTable(data.accounts, c.currency);
-                } else {
-                    document.getElementById('status-text').innerText = \`Tracking \${c.currency} via API\`;
-                    document.getElementById('status-text').style.color = "var(--green)";
-                    document.getElementById('elapsed').innerText = formatTime(c.secondsElapsed);
-                    document.getElementById('time').innerText = c.timestamp;
-
-                    updateVal('total', c.total, false, false, c.currency);
-                    updateVal('free', c.free, false, false, c.currency);
-                    updateVal('growth', c.growth, false, true, c.currency);
-                    document.getElementById('growthPct').innerHTML = \`<span class="\${colorClass(c.growthPct)}">\${fmtPct(c.growthPct)}</span>\`;
-
-                    updateVal('projSec', c.avgGrowthPerSec, false, true, c.currency);
-                    updateVal('projHour', c.growthPerHour, false, true, c.currency);
-                    updateVal('projDay', c.growthPerDay, false, true, c.currency);
-
-                    updateVal('startWallet', c.startBalance, false, false, c.currency);
-                    updateVal('currentWallet', c.total, false, false, c.currency);
-                    updateVal('used', c.used, false, false, c.currency);
-
-                    renderTable(data.accounts, c.currency);
-                }
+        async function resetSession() { 
+            if(confirm('Reset stats to current Wallet Balance?')) {
+                await fetch('/api/reset', { method: 'POST' });
             }
-        } catch(err) {
-            console.error("API Error", err);
-            document.getElementById('status-text').innerText = "Network Error: " + err.message;
-            document.getElementById('status-text').style.color = "var(--red)";
-        } finally {
-            setTimeout(pollData, 2000); // 2 second pause before fetching again
         }
-    }
+        
+        function changeCurrency(newCoin) {
+            currentCurrency = newCoin;
+            document.getElementById('status-text').innerText = 'Switching currencies...';
+            document.getElementById('total').innerText = '...';
+        }
+        
+        const fmt = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+        const fmtPct = (n) => (n > 0 ? '↑ ' : (n < 0 ? '↓ ' : '')) + Math.abs(Number(n)).toFixed(4) + '%';
+        const colorClass = (n) => n > 0 ? 'green' : (n < 0 ? 'red' : '');
+        
+        const formatTime = (seconds) => {
+            const h = Math.floor(seconds / 3600).toString().padStart(2,'0');
+            const m = Math.floor((seconds % 3600) / 60).toString().padStart(2,'0');
+            const s = Math.floor(seconds % 60).toString().padStart(2,'0');
+            return \`\${h}:\${m}:\${s}\`;
+        };
 
-    function renderTable(accounts, currency) {
-        const tbody = document.getElementById('accBody');
-        tbody.innerHTML = '';
-        accounts.forEach(acc => {
-            const tr = document.createElement('tr');
+        const updateVal = (id, val, isPct=false, colorize=false, currency='') => {
+            const el = document.getElementById(id);
+            if(!el) return;
+            let txt = isPct ? fmtPct(val) : fmt(val);
+            if(colorize && val > 0 && !isPct) txt = '+' + txt;
+            if(currency && !isPct) txt = txt + ' ' + currency;
             
-            let statusHtml = acc.isLoaded 
-                ? '<span style="color:var(--green); font-weight:700;">OK</span>' 
-                : \`<span style="color:var(--red); font-weight:700; font-size:11px;">\${acc.error}</span>\`;
-                
-            tr.innerHTML = \`
-                <td>\${acc.name}</td>
-                <td class="num-col">\${fmt(acc.total)} \${currency}</td>
-                <td class="num-col" style="color:#6b7280;">\${fmt(acc.free)} \${currency}</td>
-                <td class="status-col">\${statusHtml}</td>
-            \`;
-            tbody.appendChild(tr);
-        });
-    }
+            el.innerText = txt;
+            if(colorize) el.className = 'value ' + colorClass(val);
+        };
 
-    pollData();
-</script>
+        async function pollData() {
+            try {
+                document.getElementById('dot').classList.remove('live');
+                const res = await fetch('/api/data?currency=' + currentCurrency);
+                const data = await res.json();
+                
+                if (data.error) {
+                    document.getElementById('status-text').innerText = "Action required";
+                    document.getElementById('status-text').style.color = "var(--red)";
+                } else {
+                    document.getElementById('dot').classList.add('live');
+                    const c = data.combined;
+                    
+                    if (!c.isReady) {
+                        document.getElementById('status-text').innerText = \`Getting ready (\${c.loadedCount}/\${c.totalCount})\`;
+                        renderTable(data.accounts, c.currency);
+                    } else {
+                        document.getElementById('status-text').innerText = \`Ready (\${c.loadedCount}/\${c.totalCount})\`;
+                        document.getElementById('status-text').style.color = "var(--green)";
+                        document.getElementById('elapsed').innerText = formatTime(c.secondsElapsed);
+                        document.getElementById('time').innerText = c.timestamp;
+
+                        updateVal('total', c.total, false, false, c.currency);
+                        updateVal('free', c.free, false, false, c.currency);
+                        updateVal('growth', c.growth, false, true, '');
+                        
+                        const pctEl = document.getElementById('growthPct');
+                        pctEl.innerText = fmtPct(c.growthPct);
+                        pctEl.className = 'trend ' + colorClass(c.growthPct);
+
+                        updateVal('projSec', c.avgGrowthPerSec, false, true, '');
+                        updateVal('perfRpm', c.avgGrowthPerSec, false, true, '');
+                        updateVal('projHour', c.growthPerHour, false, true, '');
+                        updateVal('projDay', c.growthPerDay, false, true, '');
+
+                        updateVal('startWallet', c.startBalance, false, false, c.currency);
+                        updateVal('used', c.used, false, false, '');
+
+                        renderTable(data.accounts, c.currency);
+                    }
+                }
+            } catch(err) {
+                console.error("API Error", err);
+                document.getElementById('status-text').innerText = "Offline";
+                document.getElementById('status-text').style.color = "var(--red)";
+            } finally {
+                setTimeout(pollData, 2000); 
+            }
+        }
+
+        function renderTable(accounts, currency) {
+            const tbody = document.getElementById('accBody');
+            tbody.innerHTML = '';
+            accounts.forEach(acc => {
+                const tr = document.createElement('tr');
+                
+                let statusHtml = acc.isLoaded 
+                    ? '<span style="color:var(--green); font-weight:500;">Ready</span>' 
+                    : \`<span style="color:var(--red); font-size:12px;">Needs attention: \${acc.error}</span>\`;
+                    
+                tr.innerHTML = \`
+                    <td><div class="site-name"><span class="material-symbols-outlined" style="font-size:18px;">public</span> \${acc.name}</div></td>
+                    <td>\${statusHtml}</td>
+                    <td style="text-align: right; font-family:'Google Sans', sans-serif;">\${fmt(acc.total)} \${currency}</td>
+                    <td style="text-align: right; font-family:'Google Sans', sans-serif; color: var(--text-secondary);">\${fmt(acc.free)} \${currency}</td>
+                \`;
+                tbody.appendChild(tr);
+            });
+        }
+
+        pollData();
+    </script>
 </body>
 </html>
 `
