@@ -386,10 +386,10 @@ function getHtml() {
                     <span id="time" style="margin-left:8px; color:var(--text-secondary); font-size:11px;">--</span>
                 </div>
                 <select class="currency-select" id="currencySelect" onchange="changeCurrency(this.value)">
-                    <option value="USDT">USDT</option>
-                    <option value="SHIB">SHIB</option>
-                    <option value="XRP">XRP</option>
-                    <option value="BCH">BCH</option>
+                    <option value="USDT">US Dollars (USD)</option>
+                    <option value="USDC">USDC (USD)</option>
+                    <option value="SHIB">SHIB Token</option>
+                    <option value="XRP">XRP Token</option>
                 </select>
             </div>
         </div>
@@ -493,8 +493,8 @@ function getHtml() {
                         <tr>
                             <th>Site (Account Domain)</th>
                             <th>Ad serving status</th>
-                            <th style="text-align: right;">Total Ad Balance (Wallet)</th>
-                            <th style="text-align: right;">Unpaid Ad Revenue (Free)</th>
+                            <th style="text-align: right;">Total Ad Balance</th>
+                            <th style="text-align: right;">Unpaid Ad Revenue</th>
                         </tr>
                     </thead>
                     <tbody id="accBody"></tbody>
@@ -537,7 +537,13 @@ function getHtml() {
             document.getElementById('total').innerText = '...';
         }
         
-        const fmt = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 6 });
+        // Exact AdSense format: US Dollars ($) with 2 decimal points
+        const fmt = (n) => {
+            const num = Number(n);
+            const sign = num < 0 ? '-' : '';
+            return sign + '$' + Math.abs(num).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+        };
+        
         const fmtPct = (n) => (n > 0 ? '↑ ' : (n < 0 ? '↓ ' : '')) + Math.abs(Number(n)).toFixed(4) + '%';
         const colorClass = (n) => n > 0 ? 'green' : (n < 0 ? 'red' : '');
         
@@ -548,12 +554,12 @@ function getHtml() {
             return \`\${h}:\${m}:\${s}\`;
         };
 
-        const updateVal = (id, val, isPct=false, colorize=false, currency='') => {
+        const updateVal = (id, val, isPct=false, colorize=false) => {
             const el = document.getElementById(id);
             if(!el) return;
+            
             let txt = isPct ? fmtPct(val) : fmt(val);
             if(colorize && val > 0 && !isPct) txt = '+' + txt;
-            if(currency && !isPct) txt = txt + ' ' + currency;
             
             el.innerText = txt;
             if(colorize) el.className = 'value ' + colorClass(val);
@@ -599,8 +605,8 @@ function getHtml() {
                         document.getElementById('elapsed').innerText = formatTime(c.secondsElapsed);
                         document.getElementById('time').innerText = "Synced: " + c.timestamp;
 
-                        // Balance mappings
-                        updateVal('total', c.total, false, false, c.currency);
+                        // Balance mappings (Now entirely formatted as US Dollars)
+                        updateVal('total', c.total, false, false);
                         
                         // ===== CUSTOM AD MATH =====
                         if (!simState.initialized || simState.currentCurrency !== c.currency) {
@@ -644,12 +650,12 @@ function getHtml() {
                         let ctr = pageViews > 0 ? (clicks / pageViews) * 100 : 0.00;
 
                         // UPDATE UI
-                        updateVal('free', last7Days, false, false, c.currency); // Pending mapped to Last 7 days
-                        updateVal('adToday', todaySoFar, false, true, '');
-                        updateVal('adYesterday', yesterday, false, false, '');
-                        updateVal('adLast7', last7Days, false, false, '');
-                        updateVal('adMonth', thisMonth, false, false, '');
-                        updateVal('adLastPayment', lastPayment, false, false, c.currency);
+                        updateVal('free', last7Days, false, false); // Pending mapped to Last 7 days
+                        updateVal('adToday', todaySoFar, false, true);
+                        updateVal('adYesterday', yesterday, false, false);
+                        updateVal('adLast7', last7Days, false, false);
+                        updateVal('adMonth', thisMonth, false, false);
+                        updateVal('adLastPayment', lastPayment, false, false);
 
                         // Update Trend percentage for "Today" so it looks active
                         const pctEl = document.getElementById('growthPct');
@@ -661,10 +667,10 @@ function getHtml() {
                         document.getElementById('adImpressions').innerText = impressions.toLocaleString('en-US');
                         document.getElementById('adRequests').innerText = adRequests.toLocaleString('en-US');
                         
-                        updateVal('adRpm', rpm, false, false, '');
+                        updateVal('adRpm', rpm, false, false);
                         
-                        // Set exact CPC and CTR strings
-                        document.getElementById('adCpc').innerText = Number(cpc).toFixed(3) + ' ' + c.currency;
+                        // Set exact CPC and CTR formatted strings
+                        document.getElementById('adCpc').innerText = fmt(cpc);
                         document.getElementById('adCtr').innerText = Number(ctr).toFixed(2) + '%';
 
                         renderTable(data.accounts, c.currency);
@@ -692,8 +698,8 @@ function getHtml() {
                 tr.innerHTML = \`
                     <td><div class="site-name"><span class="material-symbols-outlined" style="font-size:18px;">public</span> \${acc.name}.com</div></td>
                     <td>\${statusHtml}</td>
-                    <td style="text-align: right; font-family:'Google Sans', sans-serif;">\${fmt(acc.total)} \${currency}</td>
-                    <td style="text-align: right; font-family:'Google Sans', sans-serif; color: var(--text-secondary);">\${fmt(acc.free)} \${currency}</td>
+                    <td style="text-align: right; font-family:'Google Sans', sans-serif;">\${fmt(acc.total)}</td>
+                    <td style="text-align: right; font-family:'Google Sans', sans-serif; color: var(--text-secondary);">\${fmt(acc.free)}</td>
                 \`;
                 tbody.appendChild(tr);
             });
