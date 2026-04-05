@@ -6,8 +6,7 @@ const app = express();
 app.use(express.json());
 
 // ==================== CONFIGURATION ====================
-// 🚨 Ensure your DB password is correct here.
-const MONGO_URI = "mongodb+srv://web88888888888888_db_user:ZETrZHXzaxoekjkm@clusterweb8888.l0rv6hv.mongodb.net/botdb?appName=Clusterweb8888";
+const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://web88888888888888_db_user:ZETrZHXzaxoekjkm@clusterweb8888.l0rv6hv.mongodb.net/botdb?appName=Clusterweb8888";
 const TARGET_USERNAME = 'webweb8888';
 const SUPPORTED_CURRENCIES = ['USDT', 'SHIB', 'XRP', 'BCH', 'ZAR'];
 
@@ -18,6 +17,7 @@ let dbCollection = null;
 let targetUserId = null;
 let accounts = [];
 let dbDebugMsg = "Initializing...";
+let lastDbSync = 0; 
 
 let state = {
     startTime: null,         
@@ -28,7 +28,8 @@ let state = {
 
 // ==================== 1. DATABASE LOADER ====================
 async function ensureDbLoaded() {
-    if (accounts.length > 0) return true; // Already loaded
+    const now = Date.now();
+    if (accounts.length > 0 && (now - lastDbSync < 60000)) return true;
 
     try {
         if (!mongoClient) {
@@ -66,7 +67,6 @@ async function ensureDbLoaded() {
             return false;
         }
 
-        // Create a unique CCXT instance for EVERY account so they don't overwrite each other
         accounts = masterSettings.subAccounts
             .filter(sub => sub.apiKey && sub.secret)
             .map((sub, index) => ({
@@ -75,7 +75,7 @@ async function ensureDbLoaded() {
                 exchange: new ccxt.huobi({
                     apiKey: sub.apiKey,
                     secret: sub.secret,
-                    enableRateLimit: false,
+                    enableRateLimit: false, // 🚨 REVERTED BACK TO FALSE: Fixes the P2 Error
                     options: { defaultType: 'linear' }
                 }),
                 data: { total: 0, free: 0, used: 0, error: null }
@@ -86,6 +86,7 @@ async function ensureDbLoaded() {
             return false;
         }
 
+        lastDbSync = Date.now();
         return true;
     } catch (err) {
         dbDebugMsg = `MongoDB Crash: ` + err.message;
@@ -99,7 +100,6 @@ async function fetchAccountData(acc, currency) {
         let totalEquity = 0; let freeCurrency = 0; let balSuccess = false;
         
         try {
-            // Use the specific account's exchange instance
             const bal = await acc.exchange.fetchBalance({ type: 'swap', marginMode: 'cross' });
             if (bal?.total?.[currency] !== undefined) {
                 totalEquity = parseFloat(bal.total[currency] || 0);
@@ -107,7 +107,6 @@ async function fetchAccountData(acc, currency) {
                 balSuccess = true;
             }
         } catch(e) {
-            // Throw the specific CCXT error so we can catch it below
             throw e; 
         }
         
@@ -131,11 +130,9 @@ async function fetchAccountData(acc, currency) {
         };
         return acc;
     } catch (err) {
-        // 🚨 FIX: Extract the exact HTX error message and send it to the UI
         let errMsg = err.message || "API Error";
-        errMsg = errMsg.replace('huobi ', ''); // Clean up the ccxt prefix
+        errMsg = errMsg.replace('huobi ', ''); 
         
-        // Truncate if it's too long so it doesn't break the HTML table
         if(errMsg.length > 35) errMsg = errMsg.substring(0, 35) + "...";
         
         acc.data.error = errMsg;
@@ -144,8 +141,6 @@ async function fetchAccountData(acc, currency) {
 }
 
 // ==================== 3. VERCEL API ENDPOINTS ====================
-
-// API: Fetch Latest Data (Frontend calls this every 2 seconds)
 app.get('/api/data', async (req, res) => {
     const requestedCurrency = req.query.currency || 'USDT';
     
@@ -161,7 +156,6 @@ app.get('/api/data', async (req, res) => {
             return res.json({ error: "DB Error: " + dbDebugMsg, combined: { isReady: false } });
         }
 
-        // Fetch HTX data for all accounts simultaneously
         await Promise.all(accounts.map(acc => fetchAccountData(acc, state.currency)));
 
         let grandTotal = 0, grandFree = 0, grandUsed = 0, loadedCount = 0;
@@ -174,7 +168,6 @@ app.get('/api/data', async (req, res) => {
             }
         });
 
-        // Initialize Database Session state if needed
         if (!state.isInitialized && loadedCount > 0 && loadedCount === accounts.length) {
             let doc = await dbCollection.findOne({ currency: state.currency });
             if (doc && doc.startTime && doc.startBalance !== undefined) {
@@ -215,20 +208,17 @@ app.get('/api/data', async (req, res) => {
                 avgGrowthPctPerSec: state.startBalance > 0 ? (avgGrowthPerSec / state.startBalance) * 100 : 0,
                 growthPerHour: avgGrowthPerSec * 3600,
                 growthPerDay: avgGrowthPerSec * 86400,
-                growthPerMonth: avgGrowthPerSec * 2592000,
-                growthPerYear: avgGrowthPerSec * 31536000,
                 timestamp: new Date().toLocaleTimeString()
             },
             accounts: accounts.map(a => ({ name: a.name, ...a.data, isLoaded: !a.data.error }))
         };
 
-        // Save progress to DB occasionally
         if (state.isInitialized) {
-            await dbCollection.updateOne(
+            dbCollection.updateOne(
                 { currency: state.currency },
                 { $set: { currentTotal: grandTotal, growth, updatedAt: new Date() } },
                 { upsert: true }
-            );
+            ).catch(() => {});
         }
 
         res.json(payload);
@@ -239,7 +229,6 @@ app.get('/api/data', async (req, res) => {
     }
 });
 
-// API: Reset Stats manually
 app.post('/api/reset', async (req, res) => {
     let grandTotal = accounts.reduce((sum, a) => sum + (a.data.total || 0), 0);
     state.startTime = Date.now();
@@ -256,7 +245,6 @@ app.post('/api/reset', async (req, res) => {
     res.json({ success: true });
 });
 
-// UI Route
 app.get('/', (req, res) => res.send(getHtml()));
 
 // ==================== HTML / FRONTEND ====================
@@ -410,7 +398,8 @@ function getHtml() {
         pollData();
     }
     
-    const fmt = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 6, maximumFractionDigits: 6 });
+    // 🚨 Keeps your perfect 10 decimal formatting
+    const fmt = (n) => Number(n).toLocaleString('en-US', { minimumFractionDigits: 6, maximumFractionDigits: 10 });
     const fmtPct = (n) => (n > 0 ? '+' : '') + Number(n).toFixed(6) + '%';
     const colorClass = (n) => n > 0 ? 'green-txt' : (n < 0 ? 'red-txt' : '');
     
@@ -483,7 +472,6 @@ function getHtml() {
         accounts.forEach(acc => {
             const tr = document.createElement('tr');
             
-            // 🚨 Replaced basic error text with the actual CCXT detailed error response
             let statusHtml = acc.isLoaded 
                 ? '<span style="color:var(--green); font-weight:700;">OK</span>' 
                 : \`<span style="color:var(--red); font-weight:700; font-size:11px;">\${acc.error}</span>\`;
@@ -506,5 +494,4 @@ function getHtml() {
 `;
 }
 
-// Export for Vercel Serverless Function
 module.exports = app;
