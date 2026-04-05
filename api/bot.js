@@ -585,18 +585,14 @@ function getHtml() {
 
                         // 2. Fixed Traffic Settings
                         let targetRpm = 4.25;  // Fixed RPM is $4.25
-                        let targetCpc = 0.45;  // Fixed CPC is $0.45
 
                         // 3. Deterministic Traffic Metrics
                         let pageViews = todaySoFar > 0 ? Math.floor((todaySoFar / targetRpm) * 1000) : 0;
                         let impressions = Math.floor(pageViews * 1.4);       // Fixed 1.4 ads per page
                         let adRequests = Math.floor(impressions * 1.15);     // Fixed 85% fill rate equivalent
-                        let clicks = todaySoFar > 0 ? Math.floor(todaySoFar / targetCpc) : 0;
 
-                        // 4. Exact display Rates (Derived backward from rounded values to ensure math is visually perfect)
+                        // 4. Exact display Rates (RPM scales dynamically, CPC and CTR fixed to 0 as requested)
                         let rpm = pageViews > 0 ? (todaySoFar / pageViews) * 1000 : 0.00;
-                        let cpc = clicks > 0 ? (todaySoFar / clicks) : 0.00;
-                        let ctr = pageViews > 0 ? (clicks / pageViews) * 100 : 0.00;
 
                         // UPDATE UI
                         updateVal('free', last7Days, false, false); 
@@ -616,8 +612,10 @@ function getHtml() {
                         document.getElementById('adRequests').innerText = adRequests.toLocaleString('en-US');
                         
                         updateVal('adRpm', rpm, false, false);
-                        document.getElementById('adCpc').innerText = fmt(cpc);
-                        document.getElementById('adCtr').innerText = Number(ctr).toFixed(2) + '%';
+                        
+                        // Hardcoded CPC and CTR
+                        document.getElementById('adCpc').innerText = '$0.00';
+                        document.getElementById('adCtr').innerText = '0.00%';
 
                         renderTable(data.accounts, c.currency);
                     }
