@@ -1,9 +1,10 @@
-require('dotenv').config();
 const express = require('express');
 const axios = require('axios');
 
 const app = express();
-const API_KEY = process.env.NEWS_API_KEY;
+
+// Your NewsAPI Key built directly into the code
+const API_KEY = '5b69e4d348ad436ca832910872c7d663';
 
 function createSlug(title) {
     if (!title) return 'news-article';
