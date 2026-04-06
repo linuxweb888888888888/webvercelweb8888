@@ -41,8 +41,12 @@ function generateRandomAd(type) {
     const cta = adCTAs[Math.floor(Math.random() * adCTAs.length)];
     const color = adColors[Math.floor(Math.random() * adColors.length)];
     
-    // Generate Google Search URL based on Ad Keywords
-    const searchKeywords = `${brand} ${headline}`;
+    // --- UPDATED: Generate Google Search URL with dashes and lowercase ---
+    const searchKeywords = `${brand} ${headline}`
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-') // Replace spaces & special characters with dashes
+        .replace(/(^-|-$)/g, '');    // Remove leading or trailing dashes
+        
     const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(searchKeywords)}`;
 
     // Generate a consistent but realistic placeholder image based on the brand
@@ -50,7 +54,6 @@ function generateRandomAd(type) {
     const imageUrl = `https://picsum.photos/seed/${imgSeed}/400/300`;
 
     // Google AdSense UI Overlay (AdChoices & Close button)
-    // Added onclick="event.preventDefault();" so clicking the "Ad" badge doesn't trigger the search
     const adChoicesUI = `
         <div class="mock-ad-choices" onclick="event.preventDefault();">
             <span class="mock-ad-badge">Ad</span>
@@ -60,7 +63,7 @@ function generateRandomAd(type) {
     `;
 
     if (type === 'banner') {
-        // TOP BANNER - Now an <a> tag pointing to Google
+        // TOP BANNER
         return `
             <a href="${googleUrl}" target="_blank" class="mock-ad-container banner-ad mb-4 w-100 d-block text-decoration-none">
                 ${adChoicesUI}
@@ -76,7 +79,7 @@ function generateRandomAd(type) {
             </a>
         `;
     } else {
-        // RIGHT SIDEBAR - Now an <a> tag pointing to Google
+        // RIGHT SIDEBAR
         return `
             <a href="${googleUrl}" target="_blank" class="mock-ad-container sidebar-ad sticky-top d-block text-decoration-none" style="top: 20px;">
                 ${adChoicesUI}
